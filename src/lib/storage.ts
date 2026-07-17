@@ -11,6 +11,9 @@ export const DURABLE_STORAGE_KEYS = [
   "kiwi.projectActions",
   "kiwi.scheduledTasks",
   "kiwi.pinnedThreads",
+  "kiwi.skillsFolder",
+  "kiwi.skillAliases",
+  "kiwi.disabledSkills",
 ] as const;
 
 export function loadStored<T>(key: string, fallback: T): T {

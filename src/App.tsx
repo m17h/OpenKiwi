@@ -5,6 +5,7 @@ import { isPermissionGranted, requestPermission, sendNotification } from "@tauri
 import {
   ArrowUp,
   Bot,
+  Boxes,
   Check,
   ChevronDown,
   ChevronRight,
@@ -71,12 +72,12 @@ import { OpenRouterModelControl, type OpenRouterModel } from "./components/OpenR
 import { ApprovalCenter } from "./components/ApprovalCenter";
 import { CommandPalette } from "./components/CommandPalette";
 import { HarnessSettings } from "./components/HarnessSettings";
+import { SkillLibrary } from "./components/SkillLibrary";
 import type {
   AgentRecord,
   AttachmentRecord,
   CheckpointRecord,
   McpView,
-  SkillView,
   StudioTab,
   TokenUsageView,
 } from "./components/StudioDock";
@@ -101,6 +102,16 @@ import type {
 import { useTaskStore } from "./lib/taskStore";
 import { friendlyError } from "./lib/errors";
 import { type AppUpdater, updateProgress, useAppUpdater } from "./lib/appUpdater";
+import {
+  createLocalSkill,
+  importLocalSkills,
+  normalizeSkillName,
+  resolveLocalSkills,
+  scanLocalSkills,
+  syncLocalSkills,
+  type LocalSkill,
+  type LocalSkillFile,
+} from "./lib/skills";
 
 const ChatTimeline = lazy(() => import("./components/ChatTimeline").then((module) => ({ default: module.ChatTimeline })));
 const StudioDock = lazy(() => import("./components/StudioDock").then((module) => ({ default: module.StudioDock })));
@@ -108,6 +119,7 @@ const StudioDock = lazy(() => import("./components/StudioDock").then((module) =>
 const EMPTY_MESSAGES: ChatMessage[] = [];
 const EMPTY_ACTIVITIES: Activity[] = [];
 const EMPTY_AGENTS: AgentRecord[] = [];
+const RELEASE_NOTES_URL = "https://github.com/m17h/OpenKiwi/releases/latest";
 
 const THEMES: Array<{ id: ThemeName; name: string; description: string; swatches: [string, string, string] }> = [
   { id: "kiwi", name: "OpenKiwi", description: "The original charcoal and electric green", swatches: ["#0c0d0f", "#171a1d", "#a7e26f"] },
@@ -254,7 +266,14 @@ export default function App() {
   const [checkpoints, setCheckpoints] = useState<CheckpointRecord[]>(() => loadStored("kiwi.checkpoints", []));
   const [attachments, setAttachments] = useState<AttachmentRecord[]>([]);
   const [rateSummary, setRateSummary] = useState("");
-  const [skills, setSkills] = useState<SkillView[]>([]);
+  const [skillsFolder, setSkillsFolder] = useState(() => loadStored<string>("kiwi.skillsFolder", ""));
+  const [skillFiles, setSkillFiles] = useState<LocalSkillFile[]>([]);
+  const [skillAliases, setSkillAliases] = useState<Record<string, string>>(() => loadStored("kiwi.skillAliases", {}));
+  const [disabledSkillPaths, setDisabledSkillPaths] = useState<string[]>(() => loadStored("kiwi.disabledSkills", []));
+  const [skills, setSkills] = useState<LocalSkill[]>([]);
+  const [skillsBusy, setSkillsBusy] = useState(false);
+  const [skillsError, setSkillsError] = useState("");
+  const skillRuntimeRootRef = useRef("");
   const [mcpServers, setMcpServers] = useState<McpView[]>([]);
   const [gitOutput, setGitOutput] = useState("");
   const [gitCommitMessage, setGitCommitMessage] = useState("");
@@ -420,19 +439,77 @@ export default function App() {
     }
   }, []);
 
-  const refreshTools = useCallback(async (project: Project | null) => {
-    if (!project) return;
-    const [skillResult, mcpResult] = await Promise.allSettled([
-      rpc<{ data: Array<{ skills?: Array<{ name: string; description?: string; path?: string; enabled?: boolean }> }> }>("skills/list", { cwds: [project.path], forceReload: true }),
-      rpc<{ data: Array<{ name: string; tools?: Record<string, unknown>; authStatus?: string }> }>("mcpServerStatus/list", { detail: "full" }),
-    ]);
-    if (skillResult.status === "fulfilled") {
-      setSkills((skillResult.value.data ?? []).flatMap((entry) => entry.skills ?? []).map((skill) => ({ name: skill.name, description: skill.description, path: skill.path, enabled: skill.enabled !== false })));
+  const prepareLocalSkills = useCallback(async (
+    folder: string,
+    files: LocalSkillFile[],
+    aliases: Record<string, string>,
+    disabled: string[],
+  ) => {
+    const resolved = resolveLocalSkills(files, aliases, disabled);
+    setSkills(resolved);
+    if (!folder) {
+      skillRuntimeRootRef.current = "";
+      if (runtimeStatus?.available) await rpc("skills/extraRoots/set", { extraRoots: [] });
+      return resolved;
     }
-    if (mcpResult.status === "fulfilled") {
-      setMcpServers((mcpResult.value.data ?? []).map((server) => ({ name: server.name, status: server.authStatus || "ready", tools: Object.keys(server.tools ?? {}).length })));
+    const runtimeRoot = await syncLocalSkills(folder, resolved);
+    skillRuntimeRootRef.current = runtimeRoot;
+    if (runtimeStatus?.available) {
+      await rpc("skills/extraRoots/set", { extraRoots: [runtimeRoot] });
     }
-  }, []);
+    return resolved;
+  }, [runtimeStatus?.available]);
+
+  const refreshLocalSkills = useCallback(async (
+    folder = skillsFolder,
+    aliases = skillAliases,
+    disabled = disabledSkillPaths,
+  ) => {
+    if (!folder) {
+      setSkillFiles([]);
+      setSkills([]);
+      setSkillsError("");
+      return prepareLocalSkills("", [], aliases, disabled);
+    }
+    setSkillsBusy(true);
+    setSkillsError("");
+    try {
+      const files = await scanLocalSkills(folder);
+      setSkillFiles(files);
+      return await prepareLocalSkills(folder, files, aliases, disabled);
+    } catch (reason) {
+      setSkillsError(friendlyError(reason));
+      setSkillFiles([]);
+      setSkills([]);
+      try { await prepareLocalSkills("", [], aliases, disabled); } catch { /* Keep the scan error as the useful message. */ }
+      return [];
+    } finally {
+      setSkillsBusy(false);
+    }
+  }, [disabledSkillPaths, prepareLocalSkills, skillAliases, skillsFolder]);
+
+  const refreshTools = useCallback(async (workspace: Project | null) => {
+    await refreshLocalSkills();
+    if (!runtimeStatus?.available) return;
+    const tasks: Array<Promise<unknown>> = [
+      rpc<{ data: Array<{ name: string; tools?: Record<string, unknown>; authStatus?: string }> }>("mcpServerStatus/list", { detail: "full" })
+        .then((result) => setMcpServers(
+          (result.data ?? []).map((server) => ({
+            name: server.name,
+            status: server.authStatus || "ready",
+            tools: Object.keys(server.tools ?? {}).length,
+          })),
+        )),
+    ];
+    if (workspace) tasks.push(rpc("skills/list", { cwds: [workspace.path], forceReload: true }));
+    await Promise.allSettled(tasks);
+  }, [refreshLocalSkills, runtimeStatus?.available]);
+
+  const ensureSkillRoots = useCallback(async () => {
+    if (!runtimeStatus?.available) return;
+    const root = skillRuntimeRootRef.current;
+    await rpc("skills/extraRoots/set", { extraRoots: root ? [root] : [] });
+  }, [runtimeStatus?.available]);
 
   const executeCommand = useCallback(async (command: string[], cwd: string) => {
     return rpc<{ exitCode: number; stdout: string; stderr: string }>("command/exec", { command, cwd, timeoutMs: 120000, sandboxPolicy: commandSandbox(settings.permission, cwd) });
@@ -684,10 +761,10 @@ export default function App() {
   useEffect(() => {
     if (runtimeStatus?.available) {
       void loadThreads(activeWorkspace);
-      if (activeProject) void refreshTools(activeProject);
     } else {
       setThreads([]);
     }
+    void refreshTools(activeWorkspace);
     setActiveThread(null);
     useTaskStore.getState().setActiveThread(null);
     setAttachments([]);
@@ -816,6 +893,7 @@ export default function App() {
     setStatus("Starting");
 
     try {
+      await ensureSkillRoots();
       const fileContext = attachments.filter((item) => item.kind === "file").map((item) => `@${item.path}`).join("\n");
       const input: Array<JsonObject> = [
         { type: "text", text: fileContext ? `${text}\n\nAttached context:\n${fileContext}` : text, text_elements: [] },
@@ -1091,6 +1169,7 @@ export default function App() {
   const forkThread = async (checkpoint?: CheckpointRecord) => {
     if (!activeThread) return;
     try {
+      await ensureSkillRoots();
       const result = await rpc<{ thread: Thread }>("thread/fork", {
         threadId: checkpoint?.threadId ?? activeThread.id,
         lastTurnId: checkpoint?.turnId,
@@ -1194,11 +1273,74 @@ export default function App() {
     } catch (reason) { setError(friendlyError(reason)); }
   };
 
-  const toggleSkill = async (skill: SkillView) => {
+  const chooseSkillsFolder = async () => {
+    const selected = await open({ directory: true, multiple: false, title: "Choose your OpenKiwi skills folder" });
+    if (!selected || Array.isArray(selected)) return;
+    setSkillsFolder(selected);
+    storeValue("kiwi.skillsFolder", selected);
+    await refreshLocalSkills(selected, skillAliases, disabledSkillPaths);
+  };
+
+  const importSkills = async () => {
+    if (!skillsFolder) return;
+    const selected = await open({
+      directory: false,
+      multiple: true,
+      title: "Import Markdown skills",
+      filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
+    });
+    if (!selected) return;
+    const paths = Array.isArray(selected) ? selected : [selected];
+    setSkillsBusy(true);
+    setSkillsError("");
     try {
-      await rpc("skills/config/write", { path: skill.path ?? null, name: skill.path ? null : skill.name, enabled: skill.enabled === false });
-      await refreshTools(activeProject);
-    } catch (reason) { setError(friendlyError(reason)); }
+      await importLocalSkills(skillsFolder, paths);
+      await refreshLocalSkills();
+    } catch (reason) {
+      setSkillsError(friendlyError(reason));
+    } finally {
+      setSkillsBusy(false);
+    }
+  };
+
+  const createSkill = async (name: string, instructions: string): Promise<boolean> => {
+    if (!skillsFolder) return false;
+    setSkillsError("");
+    try {
+      await createLocalSkill(skillsFolder, name, instructions);
+      await refreshLocalSkills();
+      return true;
+    } catch (reason) {
+      setSkillsError(friendlyError(reason));
+      return false;
+    }
+  };
+
+  const renameSkill = (path: string, requestedName: string): boolean => {
+    const name = normalizeSkillName(requestedName);
+    if (!name) {
+      setSkillsError("Skill names need at least one letter or number.");
+      return false;
+    }
+    if (skills.some((skill) => skill.path !== path && skill.name === name)) {
+      setSkillsError(`Another skill already uses $${name}.`);
+      return false;
+    }
+    const next = { ...skillAliases, [path]: name };
+    setSkillAliases(next);
+    storeValue("kiwi.skillAliases", next);
+    setSkills(resolveLocalSkills(skillFiles, next, disabledSkillPaths));
+    setSkillsError("");
+    return true;
+  };
+
+  const toggleSkill = (path: string) => {
+    const next = disabledSkillPaths.includes(path)
+      ? disabledSkillPaths.filter((candidate) => candidate !== path)
+      : [...disabledSkillPaths, path];
+    setDisabledSkillPaths(next);
+    storeValue("kiwi.disabledSkills", next);
+    setSkills(resolveLocalSkills(skillFiles, skillAliases, next));
   };
 
   const connectMcp = async (server: McpView) => {
@@ -1215,6 +1357,7 @@ export default function App() {
     if (!project || (settings.provider === "openai" && account?.type !== "chatgpt") || (settings.provider === "openrouter" && !openRouterReady)) return;
     scheduledRunningRef.current.add(scheduled.id);
     try {
+      await ensureSkillRoots();
       const sandbox = settings.permission === "read-only" ? "read-only" : settings.permission === "full" ? "danger-full-access" : "workspace-write";
       const approvalPolicy = settings.permission === "ask" ? "on-request" : "never";
       const started = await rpc<{ thread: Thread }>("thread/start", {
@@ -1262,7 +1405,7 @@ export default function App() {
     } finally {
       scheduledRunningRef.current.delete(scheduled.id);
     }
-  }, [account?.type, activeProject?.id, bindThreadToProject, loadThreads, openRouterReady, projects, runtimeStatus?.available, scheduledTasks, settings]);
+  }, [account?.type, activeProject?.id, bindThreadToProject, ensureSkillRoots, loadThreads, openRouterReady, projects, runtimeStatus?.available, scheduledTasks, settings]);
 
   useEffect(() => {
     const check = () => {
@@ -1618,6 +1761,7 @@ export default function App() {
           { label: "Model", value: settings.model || "provider default" },
           { label: "Reasoning", value: settings.ultra ? "ultra" : settings.reasoningEffort },
           { label: "Sub-agents", value: settings.subagentsEnabled ? `on · max ${settings.subagentMax}` : "off" },
+          { label: "Skills", value: skillsFolder ? `${skills.filter((skill) => skill.enabled).length} enabled · local folder` : "no folder selected" },
           { label: "Permissions", value: permissionLabel(settings.permission) },
           { label: "Service tier", value: settings.serviceTier || "standard" },
         ]}
@@ -1674,11 +1818,21 @@ export default function App() {
         actions={projectActions}
         schedules={scheduledTasks}
         projects={projects}
+        skillsFolder={skillsFolder}
+        skills={skills}
+        skillsBusy={skillsBusy}
+        skillsError={skillsError}
         workspaceToolsAvailable={Boolean(activeProject)}
         onProfiles={(value) => { setPromptProfiles(value); storeValue("kiwi.promptProfiles", value); }}
         onAgents={(value) => { setCustomAgents(value); storeValue("kiwi.customAgents", value); }}
         onActions={(value) => { setProjectActions(value); storeValue("kiwi.projectActions", value); }}
         onSchedules={(value) => { setScheduledTasks(value); storeValue("kiwi.scheduledTasks", value); }}
+        onChooseSkillsFolder={() => void chooseSkillsFolder()}
+        onRefreshSkills={() => void refreshLocalSkills()}
+        onImportSkills={() => void importSkills()}
+        onCreateSkill={createSkill}
+        onRenameSkill={renameSkill}
+        onToggleSkill={toggleSkill}
       />
 
       <RuntimeSetupModal
@@ -1810,11 +1964,21 @@ function SettingsModal({
   actions,
   schedules,
   projects,
+  skillsFolder,
+  skills,
+  skillsBusy,
+  skillsError,
   workspaceToolsAvailable,
   onProfiles,
   onAgents,
   onActions,
   onSchedules,
+  onChooseSkillsFolder,
+  onRefreshSkills,
+  onImportSkills,
+  onCreateSkill,
+  onRenameSkill,
+  onToggleSkill,
 }: {
   open: boolean;
   appUpdater: AppUpdater;
@@ -1835,16 +1999,26 @@ function SettingsModal({
   actions: ProjectAction[];
   schedules: ScheduledTask[];
   projects: Project[];
+  skillsFolder: string;
+  skills: LocalSkill[];
+  skillsBusy: boolean;
+  skillsError: string;
   workspaceToolsAvailable: boolean;
   onProfiles: (value: PromptProfile[]) => void;
   onAgents: (value: CustomAgentProfile[]) => void;
   onActions: (value: ProjectAction[]) => void;
   onSchedules: (value: ScheduledTask[]) => void;
+  onChooseSkillsFolder: () => void;
+  onRefreshSkills: () => void;
+  onImportSkills: () => void;
+  onCreateSkill: (name: string, instructions: string) => Promise<boolean>;
+  onRenameSkill: (path: string, name: string) => boolean;
+  onToggleSkill: (path: string) => void;
 }) {
   const [local, setLocal] = useState(settings);
   const [apiKey, setApiKey] = useState("");
   const [busy, setBusy] = useState(false);
-  const [settingsSection, setSettingsSection] = useState<"general" | "models" | "prompts" | "agents" | "workflows" | "tools" | "updates">("general");
+  const [settingsSection, setSettingsSection] = useState<"general" | "models" | "prompts" | "agents" | "workflows" | "skills" | "tools" | "updates">("general");
 
   useEffect(() => {
     if (open) {
@@ -1927,12 +2101,13 @@ function SettingsModal({
               ["prompts", "Prompts", Sparkles],
               ["agents", "Agents", UsersRound],
               ["workflows", "Workflows", Play],
+              ["skills", "Skills", Boxes],
               ["tools", "Tools & MCP", Wrench],
               ["updates", "Updates", Download],
             ] as const).map(([id, label, Icon]) => <button key={id} className={settingsSection === id ? "active" : ""} onClick={() => setSettingsSection(id)} aria-current={settingsSection === id ? "page" : undefined}><Icon size={14} /><span>{label}</span><ChevronRight size={12} /></button>)}
           </nav>
           <div className="settings-content">
-          <div className="settings-pane-heading"><span>{settingsSection === "general" ? "General" : settingsSection === "models" ? "Models & accounts" : settingsSection === "prompts" ? "Prompts" : settingsSection === "agents" ? "Agents" : settingsSection === "workflows" ? "Workflows" : settingsSection === "tools" ? "Tools & MCP" : "Updates"}</span><small>{settingsSection === "general" ? "Appearance, runtime behavior, and diagnostics" : settingsSection === "models" ? "Providers, credentials, and model routing" : settingsSection === "prompts" ? "Your complete harness instruction and reusable profiles" : settingsSection === "agents" ? "Delegation limits and specialist configurations" : settingsSection === "workflows" ? "Reusable project actions and scheduled tasks" : settingsSection === "tools" ? "Skills and Model Context Protocol servers" : "Secure releases delivered directly from the OpenKiwi repository"}</small></div>
+          <div className="settings-pane-heading"><span>{settingsSection === "general" ? "General" : settingsSection === "models" ? "Models & accounts" : settingsSection === "prompts" ? "Prompts" : settingsSection === "agents" ? "Agents" : settingsSection === "workflows" ? "Workflows" : settingsSection === "skills" ? "Skills" : settingsSection === "tools" ? "Tools & MCP" : "Updates"}</span><small>{settingsSection === "general" ? "Appearance, runtime behavior, and diagnostics" : settingsSection === "models" ? "Providers, credentials, and model routing" : settingsSection === "prompts" ? "Your complete harness instruction and reusable profiles" : settingsSection === "agents" ? "Delegation limits and specialist configurations" : settingsSection === "workflows" ? "Reusable project actions and scheduled tasks" : settingsSection === "skills" ? "Local Markdown workflows with model-facing invocation names" : settingsSection === "tools" ? "Model Context Protocol servers and live tool controls" : "Secure releases delivered directly from the OpenKiwi repository"}</small></div>
           {settingsSection === "general" &&
           <section className="settings-section theme-settings-section">
             <div className="settings-section-heading settings-heading-with-action">
@@ -1998,6 +2173,19 @@ function SettingsModal({
           />}
 
           {settingsSection === "tools" && <div className="settings-workspace-link"><div><strong>Live tool controls</strong><small>{workspaceToolsAvailable ? "Inspect skills, connect configured MCP servers, and run project actions in the active workspace." : "Select a project to inspect live skills, MCP servers, and project actions."}</small></div><button className="secondary-button" onClick={onWorkspaceTools} disabled={!workspaceToolsAvailable}><PanelRight size={13} /> Open workspace tools</button></div>}
+
+          {settingsSection === "skills" && <SkillLibrary
+            folder={skillsFolder}
+            skills={skills}
+            busy={skillsBusy}
+            error={skillsError}
+            onChooseFolder={onChooseSkillsFolder}
+            onRefresh={onRefreshSkills}
+            onImport={onImportSkills}
+            onCreate={onCreateSkill}
+            onRename={onRenameSkill}
+            onToggle={onToggleSkill}
+          />}
 
           {settingsSection === "updates" && <UpdateSettings appUpdater={appUpdater} />}
 
@@ -2152,6 +2340,7 @@ function UpdateSettings({ appUpdater }: { appUpdater: AppUpdater }) {
       )}
       {appUpdater.notes && <div className="update-notes"><strong>What’s new</strong><p>{appUpdater.notes}</p>{appUpdater.publishedAt && <small>{new Date(appUpdater.publishedAt).toLocaleDateString()}</small>}</div>}
       <div className="update-actions">
+        <button className="secondary-button" onClick={() => void openUrl(RELEASE_NOTES_URL)}><ExternalLink size={13} /> View release notes</button>
         {appUpdater.phase === "available" ? (
           <button className="primary-button" onClick={() => void appUpdater.downloadAndRestart()}><Download size={13} /> Download, install, and restart</button>
         ) : (

@@ -61,7 +61,7 @@ export interface TokenUsageView {
   contextWindow?: number | null;
 }
 
-export interface SkillView { name: string; description?: string; path?: string; enabled?: boolean }
+export interface SkillView { name: string; description?: string; path: string; enabled?: boolean }
 export interface McpView { name: string; status: string; tools: number }
 
 const TABS: Array<{ id: StudioTab; label: string; icon: typeof CodeXml }> = [
@@ -127,7 +127,7 @@ export function StudioDock(props: {
   onGitPathAction: (action: "stage" | "revert", path: string) => void;
   onAttachPath: (path: string) => void;
   onProjectAction: (action: ProjectAction) => void;
-  onToggleSkill: (skill: SkillView) => void;
+  onToggleSkill: (path: string) => void;
   onConnectMcp: (server: McpView) => void;
 }) {
   const diffHunks = useMemo(() => props.diff.split("\n").reduce<Array<{ id: string; label: string }>>((hunks, line) => {
@@ -195,7 +195,7 @@ export function StudioDock(props: {
           <div className="studio-actions"><button onClick={props.onRefreshTools}><RefreshCw size={13} /> Rescan</button></div>
           <div className="tool-policy-card"><ShieldCheck size={14} /><div><strong>Permission-aware tools</strong><small>Terminal, Git, MCP, and agent actions follow the permission mode selected beneath the composer. Annotated destructive MCP actions still require approval.</small></div></div>
           <h3 className="panel-label">Project actions</h3><div className="studio-list compact">{props.projectActions.length ? props.projectActions.map((action) => <div className="studio-list-row" key={action.id}><Play size={14} /><div><strong>{action.name}</strong><small>{action.command}</small></div><button onClick={() => props.onProjectAction(action)} title="Run action"><Play size={13} /></button></div>) : <span className="tool-empty-line">Add reusable actions in Settings.</span>}</div>
-          <h3 className="panel-label">Skills</h3><div className="studio-list compact">{props.skills.length ? props.skills.map((skill) => <div className={`studio-list-row ${skill.enabled === false ? "disabled-tool" : ""}`} key={`${skill.name}-${skill.path}`}><Boxes size={14} /><div><strong>{skill.name}</strong><small>{skill.description || skill.path || "Reusable workflow"}</small></div><button onClick={() => props.onToggleSkill(skill)} title={skill.enabled === false ? "Enable skill" : "Disable skill"}>{skill.enabled === false ? <Plus size={13} /> : <Check size={13} />}</button></div>) : <Empty icon={Boxes} title="No skills found" text="Skills in the isolated OpenKiwi runtime appear here." />}</div>
+          <h3 className="panel-label">Skills</h3><div className="studio-list compact">{props.skills.length ? props.skills.map((skill) => <div className={`studio-list-row ${skill.enabled === false ? "disabled-tool" : ""}`} key={`${skill.name}-${skill.path}`}><Boxes size={14} /><div><strong>${skill.name}</strong><small>{skill.description || skill.path || "Reusable workflow"}</small></div><button onClick={() => props.onToggleSkill(skill.path)} title={skill.enabled === false ? "Enable skill" : "Disable skill"}>{skill.enabled === false ? <Plus size={13} /> : <Check size={13} />}</button></div>) : <Empty icon={Boxes} title="No skills found" text="Choose a local skills folder in Settings → Skills." />}</div>
           <h3 className="panel-label">MCP servers</h3><div className="studio-list compact">{props.mcpServers.length ? props.mcpServers.map((server) => <div className="studio-list-row" key={server.name}><span className={`status-orb ${server.status}`} /><div><strong>{server.name}</strong><small>{server.status} · {server.tools} tools</small></div>{!['ready','oAuth','bearerToken'].includes(server.status) && <button onClick={() => props.onConnectMcp(server)} title="Connect server"><ChevronRight size={13} /></button>}</div>) : <Empty icon={Wrench} title="No MCP servers" text="Configured servers and their tool counts appear here." />}</div>
         </>}
 

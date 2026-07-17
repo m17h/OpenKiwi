@@ -73,7 +73,7 @@ export function HarnessSettings({ section, settings, profiles, agents, actions, 
       <div className="settings-section-heading"><div className="settings-icon"><Wrench size={17} /></div><div><h3>MCP servers</h3><p>Add a local stdio MCP server. Its command is written to OpenKiwi’s isolated Codex configuration.</p></div></div>
       <div className="inline-create two"><input value={mcpName} onChange={(event) => setMcpName(event.target.value)} placeholder="Server name" /><input value={mcpCommand} onChange={(event) => setMcpCommand(event.target.value)} placeholder="Command, for example: npx -y package" /><button disabled={!mcpName.trim() || !mcpCommand.trim()} onClick={() => { const parts = mcpCommand.trim().split(/\s+/); setMcpStatus("Saving…"); void rpc("config/value/write", { keyPath: `mcp_servers.${mcpName.trim().replace(/[^a-zA-Z0-9_-]/g, "-")}`, value: { command: parts[0], args: parts.slice(1) }, mergeStrategy: "upsert" }).then(() => rpc("config/mcpServer/reload")).then(() => { setMcpStatus("Connected. Open Workspace tools → Tools to inspect it."); setMcpName(""); setMcpCommand(""); }).catch((reason) => setMcpStatus(friendlyError(reason))); }}><Plus size={12} /> Add</button></div>
       {mcpStatus && <div className="manager-status">{mcpStatus}</div>}
-      <div className="compact-note"><Wrench size={14} /><span><strong>Skills and MCP controls</strong><small>Enable skills and complete MCP OAuth from Workspace tools → Tools. All tools remain permission-aware.</small></span></div>
+      <div className="compact-note"><Wrench size={14} /><span><strong>MCP controls</strong><small>Complete MCP OAuth from Workspace tools → Tools. Manage local Markdown workflows in the dedicated Skills section.</small></span></div>
     </section>}
   </>;
 }
