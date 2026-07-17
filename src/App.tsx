@@ -100,6 +100,7 @@ import type {
 } from "./types";
 import { useTaskStore } from "./lib/taskStore";
 import { friendlyError } from "./lib/errors";
+import { type AppUpdater, updateProgress, useAppUpdater } from "./lib/appUpdater";
 
 const ChatTimeline = lazy(() => import("./components/ChatTimeline").then((module) => ({ default: module.ChatTimeline })));
 const StudioDock = lazy(() => import("./components/StudioDock").then((module) => ({ default: module.StudioDock })));
@@ -210,6 +211,7 @@ function commandSandbox(permission: PermissionMode, cwd: string): JsonObject {
 }
 
 export default function App() {
+  const appUpdater = useAppUpdater();
   const [projects, setProjects] = useState<Project[]>(initialProjects);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(initialProjects[0]?.id ?? null);
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>(initialWorkspaceMode);
@@ -1436,6 +1438,14 @@ export default function App() {
           </div>
         </header>
 
+        {appUpdater.phase === "available" && (
+          <div className="app-update-banner" role="status">
+            <span className="app-update-banner-icon"><Download size={15} /></span>
+            <span><strong>OpenKiwi {appUpdater.availableVersion} is ready</strong><small>Review the release notes, then update and restart from Settings.</small></span>
+            <button className="secondary-button" onClick={() => setSettingsOpen(true)}>View update</button>
+          </div>
+        )}
+
         {!activeWorkspace ? (
           <section className="welcome-screen">
             <div className="welcome-orbit"><Code2 size={34} /></div>
@@ -1643,6 +1653,7 @@ export default function App() {
 
       <SettingsModal
         open={settingsOpen}
+        appUpdater={appUpdater}
         settings={settings}
         account={account}
         runtimeStatus={runtimeStatus}
@@ -1781,6 +1792,7 @@ function AuthRequiredModal({
 
 function SettingsModal({
   open,
+  appUpdater,
   settings,
   account,
   runtimeStatus,
@@ -1805,6 +1817,7 @@ function SettingsModal({
   onSchedules,
 }: {
   open: boolean;
+  appUpdater: AppUpdater;
   settings: AppSettings;
   account: Account | null;
   runtimeStatus: CodexRuntimeStatus | null;
@@ -1831,11 +1844,14 @@ function SettingsModal({
   const [local, setLocal] = useState(settings);
   const [apiKey, setApiKey] = useState("");
   const [busy, setBusy] = useState(false);
-  const [settingsSection, setSettingsSection] = useState<"general" | "models" | "prompts" | "agents" | "workflows" | "tools">("general");
+  const [settingsSection, setSettingsSection] = useState<"general" | "models" | "prompts" | "agents" | "workflows" | "tools" | "updates">("general");
 
   useEffect(() => {
-    if (open) setLocal(settings);
-  }, [open, settings]);
+    if (open) {
+      setLocal(settings);
+      if (appUpdater.phase === "available") setSettingsSection("updates");
+    }
+  }, [appUpdater.phase, open, settings]);
 
   useEffect(() => {
     if (!open) return;
@@ -1912,10 +1928,11 @@ function SettingsModal({
               ["agents", "Agents", UsersRound],
               ["workflows", "Workflows", Play],
               ["tools", "Tools & MCP", Wrench],
+              ["updates", "Updates", Download],
             ] as const).map(([id, label, Icon]) => <button key={id} className={settingsSection === id ? "active" : ""} onClick={() => setSettingsSection(id)} aria-current={settingsSection === id ? "page" : undefined}><Icon size={14} /><span>{label}</span><ChevronRight size={12} /></button>)}
           </nav>
           <div className="settings-content">
-          <div className="settings-pane-heading"><span>{settingsSection === "general" ? "General" : settingsSection === "models" ? "Models & accounts" : settingsSection === "prompts" ? "Prompts" : settingsSection === "agents" ? "Agents" : settingsSection === "workflows" ? "Workflows" : "Tools & MCP"}</span><small>{settingsSection === "general" ? "Appearance, runtime behavior, and diagnostics" : settingsSection === "models" ? "Providers, credentials, and model routing" : settingsSection === "prompts" ? "Your complete harness instruction and reusable profiles" : settingsSection === "agents" ? "Delegation limits and specialist configurations" : settingsSection === "workflows" ? "Reusable project actions and scheduled tasks" : "Skills and Model Context Protocol servers"}</small></div>
+          <div className="settings-pane-heading"><span>{settingsSection === "general" ? "General" : settingsSection === "models" ? "Models & accounts" : settingsSection === "prompts" ? "Prompts" : settingsSection === "agents" ? "Agents" : settingsSection === "workflows" ? "Workflows" : settingsSection === "tools" ? "Tools & MCP" : "Updates"}</span><small>{settingsSection === "general" ? "Appearance, runtime behavior, and diagnostics" : settingsSection === "models" ? "Providers, credentials, and model routing" : settingsSection === "prompts" ? "Your complete harness instruction and reusable profiles" : settingsSection === "agents" ? "Delegation limits and specialist configurations" : settingsSection === "workflows" ? "Reusable project actions and scheduled tasks" : settingsSection === "tools" ? "Skills and Model Context Protocol servers" : "Secure releases delivered directly from the OpenKiwi repository"}</small></div>
           {settingsSection === "general" &&
           <section className="settings-section theme-settings-section">
             <div className="settings-section-heading settings-heading-with-action">
@@ -1981,6 +1998,8 @@ function SettingsModal({
           />}
 
           {settingsSection === "tools" && <div className="settings-workspace-link"><div><strong>Live tool controls</strong><small>{workspaceToolsAvailable ? "Inspect skills, connect configured MCP servers, and run project actions in the active workspace." : "Select a project to inspect live skills, MCP servers, and project actions."}</small></div><button className="secondary-button" onClick={onWorkspaceTools} disabled={!workspaceToolsAvailable}><PanelRight size={13} /> Open workspace tools</button></div>}
+
+          {settingsSection === "updates" && <UpdateSettings appUpdater={appUpdater} />}
 
           {settingsSection === "general" &&
           <section className="settings-section">
@@ -2096,4 +2115,50 @@ function SettingsModal({
       </div>
     </div>
   );
+}
+
+function UpdateSettings({ appUpdater }: { appUpdater: AppUpdater }) {
+  const progress = updateProgress(appUpdater.downloadedBytes, appUpdater.totalBytes);
+  const busy = ["checking", "downloading", "installing", "restarting"].includes(appUpdater.phase);
+  const detail = appUpdater.phase === "checking" ? "Checking GitHub Releases…"
+    : appUpdater.phase === "current" ? "You have the newest available version."
+      : appUpdater.phase === "available" ? `Version ${appUpdater.availableVersion} is available.`
+        : appUpdater.phase === "downloading" ? (progress === null ? "Downloading the signed update…" : `Downloading the signed update… ${progress}%`)
+          : appUpdater.phase === "installing" ? "Verifying and installing the update…"
+            : appUpdater.phase === "restarting" ? "Update installed. Restarting OpenKiwi…"
+              : appUpdater.phase === "error" ? appUpdater.error || "The update could not be completed."
+                : "Check the public OpenKiwi repository for a newer signed release.";
+
+  return <section className="settings-section update-settings-section">
+    <div className="settings-section-heading">
+      <div className="settings-icon"><Download size={17} /></div>
+      <div><h3>OpenKiwi updates</h3><p>Updates are cryptographically verified before installation and are applied after OpenKiwi restarts.</p></div>
+    </div>
+    <div className={`update-card ${appUpdater.phase}`}>
+      <div className="update-version-row">
+        <span><small>Installed</small><strong>OpenKiwi {appUpdater.currentVersion}</strong></span>
+        {appUpdater.availableVersion && <span className="update-version-available"><small>Available</small><strong>{appUpdater.availableVersion}</strong></span>}
+      </div>
+      <div className="update-status-row">
+        {busy && <LoaderCircle className="spin" size={15} />}
+        {!busy && appUpdater.phase === "current" && <Check size={15} />}
+        {!busy && appUpdater.phase === "available" && <Download size={15} />}
+        <span>{detail}</span>
+      </div>
+      {(appUpdater.phase === "downloading" || appUpdater.phase === "installing") && (
+        <div className={`update-progress ${progress === null ? "indeterminate" : ""}`} role="progressbar" aria-label="Update download progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress ?? undefined}>
+          <span style={progress === null ? undefined : { width: `${progress}%` }} />
+        </div>
+      )}
+      {appUpdater.notes && <div className="update-notes"><strong>What’s new</strong><p>{appUpdater.notes}</p>{appUpdater.publishedAt && <small>{new Date(appUpdater.publishedAt).toLocaleDateString()}</small>}</div>}
+      <div className="update-actions">
+        {appUpdater.phase === "available" ? (
+          <button className="primary-button" onClick={() => void appUpdater.downloadAndRestart()}><Download size={13} /> Download, install, and restart</button>
+        ) : (
+          <button className="secondary-button" disabled={busy} onClick={() => void appUpdater.checkForUpdates()}>{appUpdater.phase === "checking" ? <LoaderCircle className="spin" size={13} /> : <RotateCcw size={13} />} {appUpdater.phase === "error" ? "Try again" : "Check for updates"}</button>
+        )}
+      </div>
+    </div>
+    <div className="update-trust-row"><ShieldCheck size={14} /><span><strong>Verified release channel</strong><small>Manifest and packages come from github.com/m17h/OpenKiwi and must match OpenKiwi’s embedded updater key.</small></span></div>
+  </section>;
 }

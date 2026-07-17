@@ -8,6 +8,7 @@ React webview
   ├─ thread-scoped Zustand task state
   ├─ virtualized Markdown/event rendering
   ├─ animated model/reasoning power rail
+  ├─ signed GitHub release checks + update progress
   └─ Studio: review, agents, terminal, history, context, usage, tools, and Git
           │ Tauri IPC (allowlisted commands)
           ▼
@@ -16,6 +17,7 @@ Rust desktop host
   ├─ isolated OpenKiwi app-data/Codex home
   ├─ SQLite/WAL state + audit history
   ├─ JSON-RPC request correlation + timeouts
+  ├─ Tauri updater signature verification + installation
   └─ health-checked child-process recovery
           │ JSONL over stdio
           ▼
@@ -135,4 +137,7 @@ The webview handles streamed assistant deltas, completed items, command/file/sub
 - OpenKiwi intentionally does not bundle Codex. It detects a CLI installation or the runtime inside ChatGPT for macOS, reports its version, and warns below the tested 0.145 App Server contract.
 - A closed/broken App Server fails pending calls, is respawned, reinitialized, and retries the affected RPC once.
 - Web assets are code-split so xterm and Markdown parsing do not block the initial shell.
-- Platform signing, notarization, updater keys, and store distribution are publisher responsibilities and are not committed to this repository.
+- The updater reads `latest.json` from the public GitHub Releases channel, compares semantic versions, downloads a platform bundle, verifies its mandatory updater signature, installs it, and relaunches the app.
+- Local contributor builds disable updater artifacts through `tauri.local.conf.json`; publisher builds enable them in the primary config.
+- Version bumps update npm, Tauri, Cargo, and both lockfiles together through `npm run version:bump`.
+- Platform signing, notarization, the encrypted updater private key, and staged release assets are publisher responsibilities and are not committed to this repository.

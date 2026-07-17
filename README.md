@@ -32,6 +32,8 @@ cargo check --manifest-path src-tauri/Cargo.toml
 npm run desktop:build
 ```
 
+`desktop:build` is the contributor/local build and deliberately skips update artifacts. Published releases use the signed release workflow described below.
+
 ## Provider setup
 
 ### OpenAI subscription
@@ -144,9 +146,30 @@ The review approval and checkpoint records are UI review state. Conversation rol
 - `⌘K` opens a command palette across commands, projects, and current-scope threads.
 - Scheduled project prompts run while OpenKiwi is open and create normal, inspectable App Server threads.
 
+## In-app updates and releases
+
+OpenKiwi checks the public [`m17h/OpenKiwi` GitHub Releases](https://github.com/m17h/OpenKiwi/releases) channel shortly after launch. **Settings → Updates** also provides a manual check. When a newer signed version exists, the user can review its notes, download it with progress feedback, install it, and restart into the new version without leaving the app.
+
+Both `latest.json` and the platform update bundle are hosted as GitHub Release assets. The app embeds only the updater public key and rejects artifacts that do not carry a valid matching signature. The private updater key is not part of this repository.
+
+Publisher workflow:
+
+```bash
+# Keep all version declarations synchronized (patch, minor, major, or exact version)
+npm run version:bump -- patch
+
+# With Apple notarization variables available, build and stage the latest assets
+npm run release:build
+
+# Publish release-assets/latest as the public GitHub Release
+npm run release:publish
+```
+
+`release-assets/` is intentionally ignored by Git. It holds only the current local staging payload and optional `release-notes.md`. On Morgan's release Mac, the encrypted updater key lives at `~/.tauri/openkiwi-updater.key` and its password lives in macOS Keychain. Back up that key securely: installed copies cannot trust future updates if it is lost.
+
 ## Verification and release notes
 
-`npm run verify` runs TypeScript, Rust, unit/integration component tests, and the production web build. `npm run desktop:build` produces the platform installer/application. Distribution outside local testing still requires platform signing/notarization credentials owned by the publisher; OpenKiwi does not embed those credentials or bundle Codex.
+`npm run verify` runs TypeScript, Rust, unit/integration component tests, and the production web build. `npm run desktop:build` produces a local platform installer/application without updater artifacts. `npm run release:build` requires publisher-owned signing/notarization credentials and generates the signed update payload. OpenKiwi does not embed those credentials or bundle Codex.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the component and state model.
 
