@@ -2,7 +2,7 @@
 
 OpenKiwi is a fast, local-first desktop coding harness with a user-owned instruction prompt. It supports OpenAI through an official ChatGPT subscription sign-in flow and OpenRouter through a user-supplied API key.
 
-This repository contains a runnable desktop coding environment: projects, persistent threads, streamed agent events, three permission modes, provider setup, approval dialogs, an explicit empty-by-default instruction prompt, opt-in harness-level sub-agents, animated model controls, and an integrated workspace studio.
+This repository contains a runnable desktop coding environment: normal chats, folder-bound project threads, streamed agent events, three permission modes, provider setup, approval dialogs, an explicit empty-by-default instruction prompt, opt-in harness-level sub-agents, animated model controls, and an integrated workspace studio.
 
 ## Why this architecture
 
@@ -17,7 +17,7 @@ Requirements:
 
 - Node.js 20 or newer
 - Rust stable
-- A recent `codex` CLI available on `PATH`
+- A recent Codex runtime: either the Codex CLI or ChatGPT for macOS
 
 ```bash
 npm install
@@ -37,6 +37,10 @@ npm run desktop:build
 ### OpenAI subscription
 
 Open **Settings → OpenAI → Sign in**. OpenKiwi starts the official Codex browser login through App Server. The resulting login is stored inside OpenKiwi's isolated Codex home rather than modifying the user's normal `~/.codex` state.
+
+OpenKiwi blocks OpenAI turns until that sign-in completes. Attempting to send while signed out preserves the draft and opens a dedicated authentication dialog rather than issuing an unauthorized request.
+
+OpenKiwi checks for the Codex CLI first and also recognizes the runtime included with ChatGPT for macOS. If neither is available, it opens a guided setup dialog with the official installation guide and a retry action. Only one of the two installations is needed.
 
 ### OpenRouter
 
@@ -66,6 +70,15 @@ The relevant OpenAI Codex source path treats `baseInstructions` as the highest-p
 | Full access | `danger-full-access` | `never` | Trusted projects where speed is preferred over isolation |
 
 Approval requests are delivered as App Server server-initiated RPC calls and must be answered in OpenKiwi's modal before work continues.
+
+## Chats, projects, and threads
+
+The sidebar separates the two working modes explicitly:
+
+- **Chats** creates normal conversations that are not attached to a user project folder. App Server still receives a stable private working directory inside OpenKiwi's application data so those conversations can persist safely, but it is never presented as a project and project workspace tools stay disabled.
+- **Projects** contains folders chosen by the user. Every project thread is bound to the folder where it was created. OpenKiwi filters thread history by that exact working directory, records a local binding for new and forked threads, rejects cross-project resumes, and reapplies the project `cwd`, workspace root, and selected sandbox on every turn.
+
+The new-thread button, thread-list heading, top bar, empty state, and composer all show the current scope, making it clear whether the next turn is a normal chat or will work inside a selected folder.
 
 ## Sub-agents
 
@@ -121,7 +134,7 @@ The review approval and checkpoint records are UI review state. Conversation rol
 
 The foundation is intentionally local-first and conservative. Before calling it a production release, the next milestones are:
 
-1. Pin and bundle a tested Codex runtime instead of relying on the system `codex` binary.
+1. Add a compatibility check and guided updater for supported external Codex runtime versions.
 2. Add protocol fixtures and end-to-end tests for login, thread resume, approvals, cancellation, and both providers.
 3. Add protocol-level fixtures for every Studio action and adversarial tests for terminal/Git inputs.
 4. Add durable native audit storage, richer per-line diff comments, and project-wide thread search.

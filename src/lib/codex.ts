@@ -11,6 +11,20 @@ export interface CodexEvent {
   line?: string;
 }
 
+export interface CodexRuntimeStatus {
+  available: boolean;
+  source: "Codex CLI" | "ChatGPT app" | "Custom path" | null;
+  path: string | null;
+}
+
+export async function getCodexRuntimeStatus(): Promise<CodexRuntimeStatus> {
+  return invoke<CodexRuntimeStatus>("codex_runtime_status");
+}
+
+export async function getNormalChatWorkspace(): Promise<string> {
+  return invoke<string>("normal_chat_workspace");
+}
+
 export async function rpc<T = JsonObject>(method: string, params: JsonObject = {}): Promise<T> {
   return invoke<T>("codex_rpc", { method, params });
 }

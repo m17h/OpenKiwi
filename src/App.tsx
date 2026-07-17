@@ -9,6 +9,8 @@ import {
   Circle,
   Code2,
   Command,
+  Download,
+  ExternalLink,
   FileCode2,
   Folder,
   FolderOpen,
@@ -38,13 +40,17 @@ import {
   X,
 } from "lucide-react";
 import {
+  getCodexRuntimeStatus,
+  getNormalChatWorkspace,
   hasOpenRouterKey,
   listOpenRouterModels,
   onCodexEvent,
   respond,
+  restartRuntime,
   rpc,
   saveOpenRouterKey,
   type CodexEvent,
+  type CodexRuntimeStatus,
   type JsonObject,
 } from "./lib/codex";
 import { loadStored, storeValue } from "./lib/storage";
@@ -68,12 +74,14 @@ import {
 type Provider = "openai" | "openrouter";
 type PermissionMode = "read-only" | "ask" | "full";
 type ThemeName = "kiwi" | "midnight" | "ember" | "violet";
+type WorkspaceMode = "chat" | "project";
 
 interface Project {
   id: string;
   name: string;
   path: string;
   pinned?: boolean;
+  isChat?: boolean;
 }
 
 interface Thread {
@@ -170,6 +178,7 @@ const DEFAULT_SETTINGS: AppSettings = {
 };
 
 const initialProjects = loadStored<Project[]>("kiwi.projects", []).sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
+const initialWorkspaceMode: WorkspaceMode = loadStored<WorkspaceMode>("kiwi.workspaceMode", initialProjects.length ? "project" : "chat");
 const storedSettings = loadStored<Partial<AppSettings>>("kiwi.settings", {});
 const initialSettings: AppSettings = {
   ...DEFAULT_SETTINGS,
@@ -183,6 +192,11 @@ const initialSettings: AppSettings = {
 
 function basename(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+}
+
+function normalizedProjectPath(path: string): string {
+  const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  return normalized || "/";
 }
 
 function decodeBase64Utf8(value: unknown): string {
@@ -237,6 +251,8 @@ function commandSandbox(permission: PermissionMode, cwd: string): JsonObject {
 export default function App() {
   const [projects, setProjects] = useState<Project[]>(initialProjects);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(initialProjects[0]?.id ?? null);
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>(initialWorkspaceMode);
+  const [chatWorkspacePath, setChatWorkspacePath] = useState("");
   const [threads, setThreads] = useState<Thread[]>([]);
   const [activeThread, setActiveThread] = useState<Thread | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -249,9 +265,15 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [permissionOpen, setPermissionOpen] = useState(false);
   const [running, setRunning] = useState(false);
-  const [status, setStatus] = useState("Ready");
+  const [status, setStatus] = useState("Checking runtime");
   const [error, setError] = useState<string | null>(null);
+  const [runtimeStatus, setRuntimeStatus] = useState<CodexRuntimeStatus | null>(null);
+  const [runtimeSetupOpen, setRuntimeSetupOpen] = useState(false);
+  const [runtimeChecking, setRuntimeChecking] = useState(false);
+  const [authRequiredOpen, setAuthRequiredOpen] = useState(false);
+  const [loginStarting, setLoginStarting] = useState(false);
   const [account, setAccount] = useState<Account | null>(null);
+  const threadProjectBindingsRef = useRef<Record<string, string> | null>(null);
   const [openRouterReady, setOpenRouterReady] = useState(false);
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const [studioOpen, setStudioOpen] = useState(false);
@@ -277,15 +299,53 @@ export default function App() {
   const [openRouterModelsError, setOpenRouterModelsError] = useState("");
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  if (threadProjectBindingsRef.current === null) {
+    threadProjectBindingsRef.current = loadStored("kiwi.threadProjects", {});
+  }
 
-  const activeProject = useMemo(
+  const selectedProject = useMemo(
     () => projects.find((project) => project.id === activeProjectId) ?? null,
     [activeProjectId, projects],
   );
+  const activeProject = workspaceMode === "project" ? selectedProject : null;
+  const chatWorkspace = useMemo<Project | null>(() => chatWorkspacePath ? ({ id: "openkiwi-normal-chats", name: "Chats", path: chatWorkspacePath, isChat: true }) : null, [chatWorkspacePath]);
+  const activeWorkspace = workspaceMode === "chat" ? chatWorkspace : activeProject;
 
   const persistSettings = useCallback((next: AppSettings) => {
     setSettings(next);
     storeValue("kiwi.settings", next);
+  }, []);
+
+  const bindThreadToProject = useCallback((threadId: string, projectPath: string) => {
+    const current = threadProjectBindingsRef.current ?? {};
+    if (current[threadId] && normalizedProjectPath(current[threadId]) === normalizedProjectPath(projectPath)) return;
+    const next = { ...current, [threadId]: projectPath };
+    threadProjectBindingsRef.current = next;
+    storeValue("kiwi.threadProjects", next);
+  }, []);
+
+  const checkRuntime = useCallback(async (showSetupWhenMissing = true): Promise<CodexRuntimeStatus> => {
+    setRuntimeChecking(true);
+    try {
+      const result = await getCodexRuntimeStatus();
+      setRuntimeStatus(result);
+      if (result.available) {
+        setStatus("Ready");
+      } else {
+        setStatus("Setup required");
+        if (showSetupWhenMissing) setRuntimeSetupOpen(true);
+      }
+      return result;
+    } catch (reason) {
+      const result: CodexRuntimeStatus = { available: false, source: null, path: null };
+      setRuntimeStatus(result);
+      setStatus("Setup required");
+      setError(String(reason));
+      if (showSetupWhenMissing) setRuntimeSetupOpen(true);
+      return result;
+    } finally {
+      setRuntimeChecking(false);
+    }
   }, []);
 
   const loadThreads = useCallback(async (project: Project | null) => {
@@ -295,7 +355,11 @@ export default function App() {
     }
     try {
       const result = await rpc<{ data: Thread[] }>("thread/list", { cwd: project.path, limit: 100 });
-      setThreads(result.data ?? []);
+      const projectPath = normalizedProjectPath(project.path);
+      setThreads((result.data ?? []).filter((thread) => {
+        const boundPath = threadProjectBindingsRef.current?.[thread.id];
+        return normalizedProjectPath(boundPath || thread.cwd) === projectPath;
+      }));
     } catch (reason) {
       setError(String(reason));
     }
@@ -305,6 +369,11 @@ export default function App() {
     try {
       const result = await rpc<{ account: Account | null }>("account/read", { refreshToken: false });
       setAccount(result.account);
+      if (result.account?.type === "chatgpt") {
+        setAuthRequiredOpen(false);
+        setError(null);
+        setStatus("Ready");
+      }
     } catch (reason) {
       setError(String(reason));
     }
@@ -491,7 +560,14 @@ export default function App() {
     let stop: (() => void) | undefined;
     void onCodexEvent((event: CodexEvent) => {
       if (event.stream === "stderr") {
-        if (event.line?.toLowerCase().includes("error")) setStatus(event.line);
+        const line = event.line?.toLowerCase() ?? "";
+        if (line.includes("401 unauthorized")) {
+          setStatus("Sign-in required");
+          setError("Sign in to your ChatGPT account in Settings before using OpenAI models.");
+          setAuthRequiredOpen(true);
+        } else if (line.includes("error")) {
+          setStatus("Runtime issue");
+        }
         return;
       }
 
@@ -558,6 +634,7 @@ export default function App() {
       }
       if (method === "account/login/completed" && params.success === false) {
         setError(String(params.error ?? "Sign in did not complete"));
+        setAuthRequiredOpen(true);
       }
     }).then((unlisten) => {
       stop = unlisten;
@@ -566,15 +643,24 @@ export default function App() {
   }, [handleItem, refreshAccount, refreshDiff, upsertAssistantDelta]);
 
   useEffect(() => {
-    void refreshAccount();
-    void refreshModels();
+    void getNormalChatWorkspace().then(setChatWorkspacePath).catch((reason) => setError(String(reason)));
+    void checkRuntime(true).then((runtime) => {
+      if (!runtime.available) return;
+      void refreshAccount();
+      void refreshModels();
+      void refreshUsage();
+    });
     void refreshOpenRouterModels();
-    void refreshUsage();
     void hasOpenRouterKey().then(setOpenRouterReady).catch(() => setOpenRouterReady(false));
-  }, [refreshAccount, refreshModels, refreshOpenRouterModels, refreshUsage]);
+  }, [checkRuntime, refreshAccount, refreshModels, refreshOpenRouterModels, refreshUsage]);
 
   useEffect(() => {
-    void loadThreads(activeProject);
+    if (runtimeStatus?.available) {
+      void loadThreads(activeWorkspace);
+      if (activeProject) void refreshTools(activeProject);
+    } else {
+      setThreads([]);
+    }
     setActiveThread(null);
     setMessages([]);
     setActivities([]);
@@ -583,8 +669,8 @@ export default function App() {
     setTokenUsage(null);
     setDiff("");
     setApprovedDiff(false);
-    void refreshTools(activeProject);
-  }, [activeProject, loadThreads, refreshTools]);
+    if (!activeProject) setStudioOpen(false);
+  }, [activeProject, activeWorkspace, loadThreads, refreshTools, runtimeStatus?.available]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -596,12 +682,16 @@ export default function App() {
     const existing = projects.find((project) => project.path === selected);
     if (existing) {
       setActiveProjectId(existing.id);
+      setWorkspaceMode("project");
+      storeValue("kiwi.workspaceMode", "project");
       return;
     }
     const project: Project = { id: crypto.randomUUID(), name: basename(selected), path: selected };
     const next = [...projects, project];
     setProjects(next);
     setActiveProjectId(project.id);
+    setWorkspaceMode("project");
+    storeValue("kiwi.workspaceMode", "project");
     storeValue("kiwi.projects", next);
   };
 
@@ -619,17 +709,32 @@ export default function App() {
     const next = projects.filter((entry) => entry.id !== project.id);
     setProjects(next);
     storeValue("kiwi.projects", next);
-    if (activeProjectId === project.id) setActiveProjectId(next[0]?.id ?? null);
+    if (activeProjectId === project.id) {
+      setActiveProjectId(next[0]?.id ?? null);
+      if (!next.length) {
+        setWorkspaceMode("chat");
+        storeValue("kiwi.workspaceMode", "chat");
+      }
+    }
   };
 
   const selectThread = async (thread: Thread) => {
+    if (!activeWorkspace) return;
+    const projectPath = normalizedProjectPath(activeWorkspace.path);
+    const threadPath = normalizedProjectPath(threadProjectBindingsRef.current?.[thread.id] || thread.cwd);
+    if (threadPath !== projectPath) {
+      setError("That thread belongs to a different chat or project and cannot be opened here.");
+      return;
+    }
     setError(null);
     setStatus("Loading thread");
     try {
       const result = await rpc<{ thread: Thread }>("thread/resume", {
         threadId: thread.id,
-        cwd: activeProject?.path,
+        cwd: activeWorkspace.path,
+        runtimeWorkspaceRoots: [activeWorkspace.path],
       });
+      bindThreadToProject(result.thread.id, activeWorkspace.path);
       setActiveThread(result.thread);
       setMessages(messagesFromTurns(result.thread.turns));
       setActivities([]);
@@ -654,7 +759,15 @@ export default function App() {
 
   const sendMessage = async () => {
     const text = draft.trim();
-    if (!text || !activeProject || running) return;
+    if (!text || !activeWorkspace || running) return;
+    if (!runtimeStatus?.available) {
+      setRuntimeSetupOpen(true);
+      return;
+    }
+    if (settings.provider === "openai" && account?.type !== "chatgpt") {
+      setAuthRequiredOpen(true);
+      return;
+    }
     if (settings.provider === "openrouter" && !openRouterReady) {
       setSettingsOpen(true);
       setError("Add an OpenRouter API key before using OpenRouter.");
@@ -685,7 +798,8 @@ export default function App() {
         const sandbox = settings.permission === "read-only" ? "read-only" : settings.permission === "full" ? "danger-full-access" : "workspace-write";
         const approvalPolicy = settings.permission === "ask" ? "on-request" : "never";
         const startParams: JsonObject = {
-          cwd: activeProject.path,
+          cwd: activeWorkspace.path,
+          runtimeWorkspaceRoots: [activeWorkspace.path],
           sandbox,
           approvalPolicy,
           baseInstructions: settings.systemPrompt,
@@ -703,28 +817,77 @@ export default function App() {
               multi_agent: settings.subagentsEnabled,
             },
           },
-          serviceName: "OpenKiwi",
+          serviceName: activeWorkspace.isChat ? "OpenKiwi Chat" : "OpenKiwi",
         };
         if (settings.model.trim()) startParams.model = settings.model.trim();
         if (settings.provider === "openrouter") startParams.modelProvider = "openrouter";
 
         const result = await rpc<{ thread: Thread }>("thread/start", startParams);
         threadId = result.thread.id;
+        bindThreadToProject(result.thread.id, activeWorkspace.path);
         setActiveThread(result.thread);
       }
 
       await rpc("turn/start", {
         threadId,
         input,
+        cwd: activeWorkspace.path,
+        runtimeWorkspaceRoots: [activeWorkspace.path],
+        sandboxPolicy: commandSandbox(settings.permission, activeWorkspace.path),
         model: settings.model.trim() || undefined,
         effort: settings.ultra ? "ultra" : settings.reasoningEffort,
       });
       setAttachments([]);
-      void loadThreads(activeProject);
+      void loadThreads(activeWorkspace);
     } catch (reason) {
       setRunning(false);
       setStatus("Ready");
       setError(String(reason));
+    }
+  };
+
+  const retryRuntime = async () => {
+    const runtime = await checkRuntime(false);
+    if (!runtime.available) {
+      setRuntimeSetupOpen(true);
+      return;
+    }
+    try {
+      await restartRuntime();
+      setRuntimeSetupOpen(false);
+      setError(null);
+      await Promise.all([refreshAccount(), refreshModels(), refreshUsage()]);
+      if (activeWorkspace) await loadThreads(activeWorkspace);
+      if (activeProject) await refreshTools(activeProject);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  };
+
+  const beginChatGptLogin = async () => {
+    if (!runtimeStatus?.available) {
+      setAuthRequiredOpen(false);
+      setRuntimeSetupOpen(true);
+      return;
+    }
+    setLoginStarting(true);
+    setError(null);
+    try {
+      const result = await rpc<{ authUrl?: string }>("account/login/start", {
+        type: "chatgpt",
+        useHostedLoginSuccessPage: true,
+        appBrand: "codex",
+      });
+      if (!result.authUrl) throw new Error("Codex did not return a ChatGPT sign-in URL.");
+      setAuthRequiredOpen(false);
+      setStatus("Waiting for sign-in");
+      await openUrl(result.authUrl);
+      window.setTimeout(() => void refreshAccount(), 1800);
+    } catch (reason) {
+      setError(String(reason));
+      setAuthRequiredOpen(true);
+    } finally {
+      setLoginStarting(false);
     }
   };
 
@@ -763,7 +926,7 @@ export default function App() {
       await rpc("thread/archive", { threadId: thread.id });
       if (activeThread?.id === thread.id) newThread();
       setThreads((current) => current.filter((entry) => entry.id !== thread.id));
-      void loadThreads(activeProject);
+      void loadThreads(activeWorkspace);
     } catch (reason) {
       setError(String(reason));
     }
@@ -845,16 +1008,18 @@ export default function App() {
       const result = await rpc<{ thread: Thread }>("thread/fork", {
         threadId: checkpoint?.threadId ?? activeThread.id,
         lastTurnId: checkpoint?.turnId,
-        cwd: activeProject?.path,
+        cwd: activeWorkspace?.path,
+        runtimeWorkspaceRoots: activeWorkspace ? [activeWorkspace.path] : undefined,
         model: settings.model,
         baseInstructions: settings.systemPrompt,
         developerInstructions: "",
       });
+      if (activeWorkspace) bindThreadToProject(result.thread.id, activeWorkspace.path);
       setActiveThread(result.thread);
       setMessages(messagesFromTurns(result.thread.turns));
       setActivities([]);
       setStudioOpen(false);
-      void loadThreads(activeProject);
+      void loadThreads(activeWorkspace);
     } catch (reason) { setError(String(reason)); }
   };
 
@@ -881,6 +1046,8 @@ export default function App() {
       setProjects(next);
       storeValue("kiwi.projects", next);
       setActiveProjectId(project.id);
+      setWorkspaceMode("project");
+      storeValue("kiwi.workspaceMode", "project");
     } catch (reason) { setError(String(reason)); }
   };
 
@@ -929,10 +1096,30 @@ export default function App() {
           </button>
         </div>
 
-        <button className="new-thread-button" onClick={newThread} disabled={!activeProject}>
+        <button className={`new-thread-button contextual ${workspaceMode}`} onClick={newThread} disabled={!activeWorkspace}>
           <Plus size={16} />
-          New thread
+          <span className="new-thread-copy">
+            <strong>{workspaceMode === "chat" ? "New normal chat" : "New project thread"}</strong>
+            <small>{workspaceMode === "chat" ? "No project folder" : activeProject?.name ?? "Select a project"}</small>
+          </span>
         </button>
+
+        <div className="sidebar-section chats-section">
+          <div className="section-label-row">
+            <span className="section-label">Chats</span>
+          </div>
+          <button
+            className={`chat-scope-row ${workspaceMode === "chat" ? "active" : ""}`}
+            onClick={() => {
+              setWorkspaceMode("chat");
+              storeValue("kiwi.workspaceMode", "chat");
+            }}
+          >
+            <span className="chat-scope-icon"><MessageSquare size={15} /></span>
+            <span><strong>Normal chats</strong><small>No project folder attached</small></span>
+            {workspaceMode === "chat" && <Check size={14} />}
+          </button>
+        </div>
 
         <div className="sidebar-section projects-section">
           <div className="section-label-row">
@@ -941,10 +1128,14 @@ export default function App() {
           </div>
           <div className="project-list">
             {projects.map((project) => (
-              <div key={project.id} className={`project-row-wrap ${project.id === activeProjectId ? "active" : ""}`}>
+              <div key={project.id} className={`project-row-wrap ${workspaceMode === "project" && project.id === activeProjectId ? "active" : ""}`}>
                 <button
                   className="project-row"
-                  onClick={() => setActiveProjectId(project.id)}
+                  onClick={() => {
+                    setActiveProjectId(project.id);
+                    setWorkspaceMode("project");
+                    storeValue("kiwi.workspaceMode", "project");
+                  }}
                   title={project.path}
                 >
                   {project.pinned ? <Pin className="project-pin-mark" size={14} /> : <Folder size={15} />}
@@ -971,8 +1162,12 @@ export default function App() {
 
         <div className="sidebar-section threads-section">
           <div className="section-label-row">
-            <span className="section-label">Threads</span>
-            {activeProject && <span className="thread-count">{threads.length}</span>}
+            <span className="section-label">{workspaceMode === "chat" ? "Chat threads" : "Project threads"}</span>
+            {activeWorkspace && <span className="thread-count">{threads.length}</span>}
+          </div>
+          <div className={`thread-scope-hint ${workspaceMode}`}>
+            {workspaceMode === "chat" ? <MessageSquare size={12} /> : <Folder size={12} />}
+            <span>{workspaceMode === "chat" ? "Not tied to a project folder" : activeProject ? `Working in ${activeProject.name}` : "Select a project above"}</span>
           </div>
           <div className="thread-list">
             {threads.map((thread) => (
@@ -1004,7 +1199,7 @@ export default function App() {
                 </div>
               </div>
             ))}
-            {activeProject && !threads.length && <div className="empty-threads">No threads yet</div>}
+            {activeWorkspace && !threads.length && <div className="empty-threads">{workspaceMode === "chat" ? "No normal chats yet" : "No threads in this project yet"}</div>}
           </div>
         </div>
 
@@ -1026,8 +1221,8 @@ export default function App() {
               </button>
             )}
             <div className="project-heading">
-              <span>{activeProject?.name ?? "No project"}</span>
-              {activeThread && <small>{activeThread.name || activeThread.preview || "New thread"}</small>}
+              <span>{activeWorkspace?.isChat ? "Normal chat" : activeProject?.name ?? "No project selected"}</span>
+              <small>{activeThread ? activeThread.name || activeThread.preview || "New thread" : activeWorkspace?.isChat ? "No project folder" : activeProject?.path ?? "Choose a project or use Chats"}</small>
             </div>
           </div>
           <div className="topbar-right">
@@ -1040,30 +1235,30 @@ export default function App() {
               {settings.provider === "openai" ? "OpenAI" : "OpenRouter"}
               {settings.model && <small>{settings.model}</small>}
             </button>
-            <button className={`icon-button studio-toggle ${studioOpen ? "active" : ""}`} onClick={() => studioOpen ? setStudioOpen(false) : openStudio(studioTab)} title="Open workspace tools">
+            <button className={`icon-button studio-toggle ${studioOpen ? "active" : ""}`} onClick={() => studioOpen ? setStudioOpen(false) : openStudio(studioTab)} title={activeProject ? "Open project workspace tools" : "Workspace tools are available inside projects"} disabled={!activeProject}>
               <PanelRight size={17} />
             </button>
           </div>
         </header>
 
-        {!activeProject ? (
+        {!activeWorkspace ? (
           <section className="welcome-screen">
             <div className="welcome-orbit"><Code2 size={34} /></div>
-            <h1>Build from a blank slate.</h1>
-            <p>Choose a project folder. OpenKiwi adds no secret instruction layer—your prompt is the prompt.</p>
-            <button className="primary-button large" onClick={addProject}><FolderOpen size={17} /> Open project</button>
+            <h1>Choose how you want to work.</h1>
+            <p>Open a project for coding inside a folder, or use a normal chat with no project attached.</p>
+            <div className="welcome-actions"><button className="primary-button large" onClick={addProject}><FolderOpen size={17} /> Open project</button><button className="secondary-button" onClick={() => { setWorkspaceMode("chat"); storeValue("kiwi.workspaceMode", "chat"); }}><MessageSquare size={16} /> Normal chat</button></div>
           </section>
         ) : (
           <>
             <section className="conversation">
               {!messages.length && !activities.length ? (
                 <div className="thread-empty-state">
-                  <div className="empty-state-icon"><Bot size={27} /></div>
-                  <h1>What should we build?</h1>
-                  <p>OpenKiwi starts with an empty instruction field. Add your own in Settings whenever you want.</p>
+                  <div className={`empty-state-icon ${activeWorkspace.isChat ? "chat" : ""}`}>{activeWorkspace.isChat ? <MessageSquare size={27} /> : <Bot size={27} />}</div>
+                  <h1>{activeWorkspace.isChat ? "Start a normal chat." : "What should we build?"}</h1>
+                  <p>{activeWorkspace.isChat ? "This conversation is not attached to any project folder. Ask a question, brainstorm, or work without repository context." : `This thread works inside ${activeProject?.name}. Commands and file changes start in that project folder.`}</p>
                   <div className="trust-strip">
                     <span><Check size={13} /> No app-added system prompt</span>
-                    <span><Check size={13} /> Local project access</span>
+                    <span><Check size={13} /> {activeWorkspace.isChat ? "No project folder" : "Local project access"}</span>
                     <span><Check size={13} /> Approval controls</span>
                   </div>
                 </div>
@@ -1097,7 +1292,7 @@ export default function App() {
                     </div>
                   )}
                   {running && !messages.some((message) => message.streaming) && (
-                    <div className="thinking-row"><LoaderCircle className="spin" size={15} /> Working in {activeProject.name}</div>
+                    <div className="thinking-row"><LoaderCircle className="spin" size={15} /> {activeWorkspace.isChat ? "Thinking in normal chat" : `Working in ${activeProject?.name}`}</div>
                   )}
                 </div>
               )}
@@ -1122,7 +1317,7 @@ export default function App() {
                       void sendMessage();
                     }
                   }}
-                  placeholder="Ask OpenKiwi to build, explain, or investigate…"
+                  placeholder={activeWorkspace.isChat ? "Ask anything — no project folder attached…" : `Ask OpenKiwi to work in ${activeProject?.name ?? "this project"}…`}
                   rows={1}
                 />
                 {settings.provider === "openai" && (
@@ -1208,7 +1403,7 @@ export default function App() {
       </main>
 
       <StudioDock
-        open={studioOpen}
+        open={studioOpen && Boolean(activeProject)}
         tab={studioTab}
         projectName={activeProject?.name}
         activeThread={Boolean(activeThread)}
@@ -1261,6 +1456,7 @@ export default function App() {
         open={settingsOpen}
         settings={settings}
         account={account}
+        runtimeStatus={runtimeStatus}
         openRouterReady={openRouterReady}
         onClose={() => setSettingsOpen(false)}
         onSave={(next) => {
@@ -1268,8 +1464,24 @@ export default function App() {
           setSettingsOpen(false);
         }}
         onAccountChange={async () => { await refreshAccount(); await refreshModels(); }}
+        onSignIn={beginChatGptLogin}
+        onRuntimeRequired={() => setRuntimeSetupOpen(true)}
         onOpenRouterChange={setOpenRouterReady}
         onError={setError}
+      />
+
+      <RuntimeSetupModal
+        open={runtimeSetupOpen}
+        checking={runtimeChecking}
+        onClose={() => setRuntimeSetupOpen(false)}
+        onRetry={() => void retryRuntime()}
+      />
+
+      <AuthRequiredModal
+        open={authRequiredOpen}
+        busy={loginStarting}
+        onClose={() => setAuthRequiredOpen(false)}
+        onSignIn={() => void beginChatGptLogin()}
       />
 
       {pendingApproval && (
@@ -1279,24 +1491,106 @@ export default function App() {
   );
 }
 
+function RuntimeSetupModal({
+  open,
+  checking,
+  onClose,
+  onRetry,
+}: {
+  open: boolean;
+  checking: boolean;
+  onClose: () => void;
+  onRetry: () => void;
+}) {
+  return (
+    <div className={`modal-backdrop runtime-setup-backdrop ${open ? "open" : "closed"}`} onMouseDown={onClose} aria-hidden={!open} inert={!open ? true : undefined}>
+      <div className="runtime-setup-modal" role="dialog" aria-modal="true" aria-labelledby="runtime-setup-title" onMouseDown={(event) => event.stopPropagation()}>
+        <button className="runtime-setup-close" onClick={onClose} aria-label="Close Codex setup"><X size={17} /></button>
+        <div className="runtime-setup-mark"><TerminalSquare size={25} /></div>
+        <div className="runtime-setup-copy">
+          <span className="runtime-eyebrow">One-time setup</span>
+          <h2 id="runtime-setup-title">Connect the Codex runtime</h2>
+          <p>OpenKiwi uses Codex App Server locally for ChatGPT subscription sign-in, OpenRouter, tools, approvals, and threads. Install either option below—never both.</p>
+        </div>
+        <div className="runtime-options">
+          <div className="runtime-option recommended">
+            <span className="runtime-option-icon"><Download size={17} /></span>
+            <div><strong>Codex CLI <em>Recommended</em></strong><small>The dependable cross-platform option and easiest runtime to keep current.</small></div>
+          </div>
+          <div className="runtime-option">
+            <span className="runtime-option-icon chatgpt"><Sparkles size={17} /></span>
+            <div><strong>ChatGPT for macOS</strong><small>Already includes a usable Codex runtime. OpenKiwi detects it automatically.</small></div>
+          </div>
+        </div>
+        <div className="runtime-note"><Check size={13} /> Your ChatGPT login still happens in the official browser flow and remains isolated to OpenKiwi.</div>
+        <div className="runtime-setup-actions">
+          <button className="secondary-button" onClick={onClose}>Not now</button>
+          <button className="secondary-button" onClick={() => void openUrl("https://learn.chatgpt.com/docs/codex/cli")}><ExternalLink size={13} /> Installation guide</button>
+          <button className="primary-button" onClick={onRetry} disabled={checking}>{checking ? <LoaderCircle className="spin" size={14} /> : <RotateCcw size={13} />} Try again</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AuthRequiredModal({
+  open,
+  busy,
+  onClose,
+  onSignIn,
+}: {
+  open: boolean;
+  busy: boolean;
+  onClose: () => void;
+  onSignIn: () => void;
+}) {
+  return (
+    <div className={`modal-backdrop runtime-setup-backdrop auth-required-backdrop ${open ? "open" : "closed"}`} onMouseDown={onClose} aria-hidden={!open} inert={!open ? true : undefined}>
+      <div className="runtime-setup-modal auth-required-modal" role="dialog" aria-modal="true" aria-labelledby="auth-required-title" onMouseDown={(event) => event.stopPropagation()}>
+        <button className="runtime-setup-close" onClick={onClose} aria-label="Close sign-in prompt"><X size={17} /></button>
+        <div className="runtime-setup-mark auth-mark"><KeyRound size={24} /></div>
+        <div className="runtime-setup-copy">
+          <span className="runtime-eyebrow">ChatGPT authentication</span>
+          <h2 id="auth-required-title">Sign in before sending</h2>
+          <p>OpenAI models cannot receive this prompt until a ChatGPT account is connected. Your draft is still waiting in the composer and has not been sent.</p>
+        </div>
+        <div className="auth-required-detail">
+          <ShieldCheck size={17} />
+          <div><strong>Official browser sign-in</strong><small>Codex opens ChatGPT in your default browser and stores the resulting session inside OpenKiwi’s isolated credential store.</small></div>
+        </div>
+        <div className="runtime-setup-actions">
+          <button className="secondary-button" onClick={onClose}>Not now</button>
+          <button className="primary-button" onClick={onSignIn} disabled={busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <ExternalLink size={13} />} Sign in with ChatGPT</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SettingsModal({
   open,
   settings,
   account,
+  runtimeStatus,
   openRouterReady,
   onClose,
   onSave,
   onAccountChange,
+  onSignIn,
+  onRuntimeRequired,
   onOpenRouterChange,
   onError,
 }: {
   open: boolean;
   settings: AppSettings;
   account: Account | null;
+  runtimeStatus: CodexRuntimeStatus | null;
   openRouterReady: boolean;
   onClose: () => void;
   onSave: (settings: AppSettings) => void;
   onAccountChange: () => Promise<void>;
+  onSignIn: () => Promise<void>;
+  onRuntimeRequired: () => void;
   onOpenRouterChange: (ready: boolean) => void;
   onError: (error: string | null) => void;
 }) {
@@ -1318,16 +1612,14 @@ function SettingsModal({
   }, [onClose, open]);
 
   const signIn = async () => {
+    if (!runtimeStatus?.available) {
+      onRuntimeRequired();
+      return;
+    }
     setBusy(true);
     onError(null);
     try {
-      const result = await rpc<{ authUrl?: string }>("account/login/start", {
-        type: "chatgpt",
-        useHostedLoginSuccessPage: true,
-        appBrand: "codex",
-      });
-      if (result.authUrl) await openUrl(result.authUrl);
-      window.setTimeout(() => void onAccountChange(), 1800);
+      await onSignIn();
     } catch (reason) {
       onError(String(reason));
     } finally {
@@ -1474,13 +1766,13 @@ function SettingsModal({
               <div className="credential-panel">
                 <div>
                   <strong>{account?.type === "chatgpt" ? account.email || "ChatGPT account" : "ChatGPT subscription"}</strong>
-                  <small>{account?.type === "chatgpt" ? `${account.planType ?? "ChatGPT"} plan connected` : "Use the official Codex browser sign-in flow"}</small>
+                  <small>{account?.type === "chatgpt" ? `${account.planType ?? "ChatGPT"} plan connected` : runtimeStatus?.available ? `Official browser sign-in · ${runtimeStatus.source} detected` : "Codex CLI or ChatGPT for macOS required"}</small>
                 </div>
                 {account?.type === "chatgpt" ? (
                   <button className="secondary-button" onClick={() => void signOut()} disabled={busy}>Sign out</button>
                 ) : (
                   <button className="secondary-button" onClick={() => void signIn()} disabled={busy}>
-                    {busy ? <LoaderCircle className="spin" size={14} /> : null} Sign in
+                    {busy ? <LoaderCircle className="spin" size={14} /> : !runtimeStatus?.available ? <Download size={14} /> : null} {runtimeStatus?.available ? "Sign in" : "Set up Codex"}
                   </button>
                 )}
               </div>

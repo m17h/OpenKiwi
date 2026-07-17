@@ -1,6 +1,8 @@
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    env,
+    ffi::OsString,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::{
         atomic::{AtomicI64, Ordering},
@@ -8,6 +10,7 @@ use std::{
     },
 };
 
+use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::{
@@ -32,6 +35,14 @@ struct AppServer {
 #[derive(Default)]
 struct RuntimeState {
     server: Mutex<Option<Arc<AppServer>>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexRuntimeStatus {
+    available: bool,
+    source: Option<&'static str>,
+    path: Option<String>,
 }
 
 impl AppServer {
@@ -134,6 +145,193 @@ wire_api = "responses"
         .map_err(|error| format!("Could not write OpenKiwi runtime configuration: {error}"))
 }
 
+fn find_on_path(program: &str) -> Option<PathBuf> {
+    env::var_os("PATH").and_then(|path| {
+        env::split_paths(&path)
+            .map(|directory| directory.join(program))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+fn push_candidate(candidates: &mut Vec<PathBuf>, candidate: PathBuf) {
+    if !candidates.contains(&candidate) {
+        candidates.push(candidate);
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn find_with_login_shell() -> Option<PathBuf> {
+    let shell = env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/zsh"));
+    let output = Command::new(shell)
+        .args(["-lc", "command -v codex"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .filter(|candidate| candidate.is_file())
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn find_with_login_shell() -> Option<PathBuf> {
+    None
+}
+
+async fn resolve_codex_binary(app: &AppHandle) -> Result<PathBuf, String> {
+    let mut candidates = Vec::new();
+    let executable_name = if cfg!(windows) { "codex.exe" } else { "codex" };
+
+    if let Some(override_path) = env::var_os("OPENKIWI_CODEX_PATH") {
+        let override_path = PathBuf::from(override_path);
+        return override_path.is_file().then_some(override_path).ok_or_else(|| {
+            "OPENKIWI_CODEX_PATH does not point to a Codex executable. Update or remove it, then choose Try again.".into()
+        });
+    }
+
+    if let Some(candidate) = find_on_path(executable_name) {
+        push_candidate(&mut candidates, candidate);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        push_candidate(
+            &mut candidates,
+            PathBuf::from("/Applications/ChatGPT.app/Contents/Resources/codex"),
+        );
+        push_candidate(&mut candidates, PathBuf::from("/opt/homebrew/bin/codex"));
+        push_candidate(&mut candidates, PathBuf::from("/usr/local/bin/codex"));
+    }
+
+    if let Ok(home) = app.path().home_dir() {
+        #[cfg(target_os = "macos")]
+        push_candidate(
+            &mut candidates,
+            home.join("Applications/ChatGPT.app/Contents/Resources/codex"),
+        );
+        for relative in [
+            ".local/bin/codex",
+            ".cargo/bin/codex",
+            ".npm-global/bin/codex",
+            ".bun/bin/codex",
+            ".volta/bin/codex",
+        ] {
+            push_candidate(&mut candidates, home.join(relative));
+        }
+    }
+
+    if let Some(candidate) = candidates.into_iter().find(|candidate| candidate.is_file()) {
+        return Ok(candidate);
+    }
+    if let Some(candidate) = find_with_login_shell().await {
+        return Ok(candidate);
+    }
+
+    Err("OpenKiwi could not find the Codex runtime. Install the Codex CLI or ChatGPT desktop app, then choose Try again. Advanced users can set OPENKIWI_CODEX_PATH to the Codex executable.".into())
+}
+
+fn runtime_source(path: &Path) -> &'static str {
+    if path
+        .to_string_lossy()
+        .contains("ChatGPT.app/Contents/Resources/codex")
+    {
+        "ChatGPT app"
+    } else if env::var_os("OPENKIWI_CODEX_PATH")
+        .is_some_and(|configured| PathBuf::from(configured) == path)
+    {
+        "Custom path"
+    } else {
+        "Codex CLI"
+    }
+}
+
+#[tauri::command]
+async fn codex_runtime_status(app: AppHandle) -> CodexRuntimeStatus {
+    match resolve_codex_binary(&app).await {
+        Ok(path) => CodexRuntimeStatus {
+            available: true,
+            source: Some(runtime_source(&path)),
+            path: Some(path.to_string_lossy().into_owned()),
+        },
+        Err(_) => CodexRuntimeStatus {
+            available: false,
+            source: None,
+            path: None,
+        },
+    }
+}
+
+#[tauri::command]
+async fn normal_chat_workspace(app: AppHandle) -> Result<String, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not resolve OpenKiwi app data: {error}"))?;
+    let workspace = app_data.join("normal-chats");
+    tokio::fs::create_dir_all(&workspace)
+        .await
+        .map_err(|error| format!("Could not create the normal chat workspace: {error}"))?;
+    Ok(workspace.to_string_lossy().into_owned())
+}
+
+fn runtime_path(codex_binary: &Path, home: Option<&Path>) -> Option<OsString> {
+    let mut directories: Vec<PathBuf> = Vec::new();
+    let mut add = |path: PathBuf| {
+        if !directories.contains(&path) {
+            directories.push(path);
+        }
+    };
+
+    if let Some(parent) = codex_binary.parent() {
+        add(parent.to_path_buf());
+        if parent.file_name().is_some_and(|name| name == "bin") {
+            if let Some(runtime_root) = parent.parent() {
+                add(runtime_root.join("codex-path"));
+                add(runtime_root.join("codex-resources").join("zsh").join("bin"));
+            }
+        }
+    }
+    if let Some(current) = env::var_os("PATH") {
+        for directory in env::split_paths(&current) {
+            add(directory);
+        }
+    }
+    for directory in [
+        "/opt/homebrew/bin",
+        "/opt/homebrew/sbin",
+        "/usr/local/bin",
+        "/usr/local/sbin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ] {
+        add(PathBuf::from(directory));
+    }
+    if let Some(home) = home {
+        for relative in [
+            ".local/bin",
+            ".cargo/bin",
+            ".npm-global/bin",
+            ".bun/bin",
+            ".volta/bin",
+        ] {
+            add(home.join(relative));
+        }
+    }
+
+    env::join_paths(directories).ok()
+}
+
 async fn spawn_server(app: &AppHandle) -> Result<Arc<AppServer>, String> {
     let app_data = app
         .path()
@@ -142,7 +340,10 @@ async fn spawn_server(app: &AppHandle) -> Result<Arc<AppServer>, String> {
     let codex_home = app_data.join("codex-home");
     write_runtime_config(&codex_home).await?;
 
-    let mut command = Command::new("codex");
+    let codex_binary = resolve_codex_binary(app).await?;
+    let home = app.path().home_dir().ok();
+
+    let mut command = Command::new(&codex_binary);
     command
         .arg("app-server")
         .env("CODEX_HOME", &codex_home)
@@ -151,13 +352,20 @@ async fn spawn_server(app: &AppHandle) -> Result<Arc<AppServer>, String> {
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
+    if let Some(path) = runtime_path(&codex_binary, home.as_deref()) {
+        command.env("PATH", path);
+    }
+
     if let Some(key) = openrouter_key() {
         command.env("OPENROUTER_API_KEY", key);
     }
 
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("Could not start `codex app-server`: {error}. Install Codex CLI and make sure it is on PATH."))?;
+    let mut child = command.spawn().map_err(|error| {
+        format!(
+            "Could not start the Codex runtime at `{}`: {error}",
+            codex_binary.display()
+        )
+    })?;
     let stdin = child
         .stdin
         .take()
@@ -378,6 +586,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(RuntimeState::default())
         .invoke_handler(tauri::generate_handler![
+            codex_runtime_status,
+            normal_chat_workspace,
             codex_rpc,
             codex_respond,
             save_openrouter_key,
