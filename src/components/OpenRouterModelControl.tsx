@@ -52,6 +52,8 @@ export function OpenRouterModelControl({
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const rootRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const normalizedEffort = effort === "ultra" ? "max" : effort;
   const effortIndex = Math.max(0, EFFORTS.findIndex((entry) => entry.value === normalizedEffort));
   const fill = (effortIndex / (EFFORTS.length - 1)) * 100;
@@ -80,10 +82,14 @@ export function OpenRouterModelControl({
     };
   }, []);
 
+  useEffect(() => {
+    if (open) requestAnimationFrame(() => searchRef.current?.focus());
+  }, [open]);
+
   return (
     <div className="openrouter-control" ref={rootRef} style={{ "--router-fill": `${fill}%` } as CSSProperties}>
       <div className={`openrouter-picker ${open ? "open" : ""}`}>
-        <button type="button" className="openrouter-trigger" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+        <button type="button" className="openrouter-trigger" aria-haspopup="menu" aria-expanded={open} aria-label={`OpenRouter model: ${selected?.name || model || "not selected"}`} onClick={() => setOpen((value) => !value)} onKeyDown={(event) => { if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); setOpen(true); } }}>
           <span className="openrouter-logo"><Route size={14} /></span>
           <span className="openrouter-trigger-copy">
             <small>OpenRouter model</small>
@@ -96,18 +102,27 @@ export function OpenRouterModelControl({
         <div className="openrouter-menu">
           <div className="openrouter-search-row">
             <Search size={14} />
-            <input autoFocus={open} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search models or enter provider/model…" />
-            <button type="button" onClick={onRefresh} title="Refresh catalog" disabled={loading}>{loading ? <LoaderCircle className="spin" size={13} /> : <RefreshCw size={13} />}</button>
+            <input ref={searchRef} aria-label="Search OpenRouter models" value={search} onChange={(event) => setSearch(event.target.value)} onKeyDown={(event) => { if (event.key === "ArrowDown") { event.preventDefault(); optionRefs.current.find(Boolean)?.focus(); } }} placeholder="Search models or enter provider/model…" />
+            <button type="button" onClick={onRefresh} title="Refresh catalog" aria-label="Refresh OpenRouter model catalog" disabled={loading}>{loading ? <LoaderCircle className="spin" size={13} /> : <RefreshCw size={13} />}</button>
           </div>
           <div className="openrouter-menu-meta"><span>{query ? `${filtered.length} matches` : `${models.length} available`}</span><small>Tool-capable catalog</small></div>
-          <div className="openrouter-options" role="listbox" aria-label="OpenRouter model selector">
+          <div className="openrouter-options" role="menu" aria-label="OpenRouter model selector">
             {filtered.map((entry) => (
               <button
                 type="button"
-                role="option"
-                aria-selected={entry.id === model}
+                role="menuitemradio"
+                aria-checked={entry.id === model}
+                aria-label={`${entry.name || entry.id}, ${providerName(entry.id)}`}
                 className={entry.id === model ? "selected" : ""}
                 key={entry.id}
+                ref={(node) => { optionRefs.current[filtered.indexOf(entry)] = node; }}
+                onKeyDown={(event) => {
+                  const enabled = optionRefs.current.filter((item): item is HTMLButtonElement => Boolean(item));
+                  const index = enabled.indexOf(event.currentTarget);
+                  if (event.key === "ArrowDown") { event.preventDefault(); enabled[(index + 1) % enabled.length]?.focus(); }
+                  if (event.key === "ArrowUp") { event.preventDefault(); (index <= 0 ? searchRef.current : enabled[index - 1])?.focus(); }
+                  if (event.key === "Escape") { event.preventDefault(); setOpen(false); }
+                }}
                 onClick={() => {
                   onModel(entry.id);
                   setSearch("");
@@ -121,7 +136,7 @@ export function OpenRouterModelControl({
               </button>
             ))}
             {canUseCustom && (
-              <button type="button" className="custom-model-option" onClick={() => { onModel(search.trim()); setSearch(""); setOpen(false); }}>
+              <button type="button" role="menuitemradio" aria-checked={false} className="custom-model-option" onClick={() => { onModel(search.trim()); setSearch(""); setOpen(false); }}>
                 <span className="openrouter-provider-mark">+</span>
                 <span><strong>Use custom model slug</strong><small>{search.trim()}</small></span>
               </button>

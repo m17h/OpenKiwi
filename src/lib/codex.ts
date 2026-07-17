@@ -15,6 +15,9 @@ export interface CodexRuntimeStatus {
   available: boolean;
   source: "Codex CLI" | "ChatGPT app" | "Custom path" | null;
   path: string | null;
+  version: string | null;
+  compatible: boolean;
+  warning: string | null;
 }
 
 export async function getCodexRuntimeStatus(): Promise<CodexRuntimeStatus> {
@@ -51,4 +54,20 @@ export async function listOpenRouterModels<T>(): Promise<T> {
 
 export async function restartRuntime(): Promise<void> {
   await invoke("restart_runtime");
+}
+
+export async function auditEvent(
+  kind: string,
+  payload: JsonObject = {},
+  threadId?: string,
+): Promise<void> {
+  await invoke("audit_append", { kind, threadId: threadId ?? null, payload });
+}
+
+export async function readDiagnostics<T = JsonObject>(): Promise<T> {
+  return invoke<T>("diagnostics_read");
+}
+
+export async function exportDiagnostics(path: string): Promise<void> {
+  await invoke("diagnostics_export", { path });
 }

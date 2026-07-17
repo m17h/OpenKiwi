@@ -1,12 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import {
   ArrowUp,
   Bot,
   Check,
   ChevronDown,
+  ChevronRight,
   Circle,
+  CircleStop,
   Code2,
   Command,
   Download,
@@ -27,8 +30,10 @@ import {
   Plus,
   Pin,
   PinOff,
+  Play,
   Pencil,
   RotateCcw,
+  Search,
   Settings,
   Shield,
   ShieldAlert,
@@ -37,10 +42,13 @@ import {
   TerminalSquare,
   Trash2,
   UsersRound,
+  Wrench,
   X,
 } from "lucide-react";
 import {
   getCodexRuntimeStatus,
+  auditEvent,
+  exportDiagnostics,
   getNormalChatWorkspace,
   hasOpenRouterKey,
   listOpenRouterModels,
@@ -60,103 +68,45 @@ import {
   type RuntimeModel,
 } from "./components/ModelPowerControl";
 import { OpenRouterModelControl, type OpenRouterModel } from "./components/OpenRouterModelControl";
-import {
-  StudioDock,
-  type AgentRecord,
-  type AttachmentRecord,
-  type CheckpointRecord,
-  type McpView,
-  type SkillView,
-  type StudioTab,
-  type TokenUsageView,
+import { ApprovalCenter } from "./components/ApprovalCenter";
+import { CommandPalette } from "./components/CommandPalette";
+import { HarnessSettings } from "./components/HarnessSettings";
+import type {
+  AgentRecord,
+  AttachmentRecord,
+  CheckpointRecord,
+  McpView,
+  SkillView,
+  StudioTab,
+  TokenUsageView,
 } from "./components/StudioDock";
+import type {
+  Account,
+  Activity,
+  AppSettings,
+  ChatMessage,
+  CustomAgentProfile,
+  PendingApproval,
+  PermissionMode,
+  Project,
+  ProjectAction,
+  PromptProfile,
+  ScheduledTask,
+  ThemeName,
+  Thread,
+  ThreadItem,
+  Turn,
+  WorkspaceMode,
+} from "./types";
+import { useTaskStore } from "./lib/taskStore";
+import { friendlyError } from "./lib/errors";
 
-type Provider = "openai" | "openrouter";
-type PermissionMode = "read-only" | "ask" | "full";
-type ThemeName = "kiwi" | "midnight" | "ember" | "violet";
-type WorkspaceMode = "chat" | "project";
+const ChatTimeline = lazy(() => import("./components/ChatTimeline").then((module) => ({ default: module.ChatTimeline })));
+const StudioDock = lazy(() => import("./components/StudioDock").then((module) => ({ default: module.StudioDock })));
 
-interface Project {
-  id: string;
-  name: string;
-  path: string;
-  pinned?: boolean;
-  isChat?: boolean;
-}
-
-interface Thread {
-  id: string;
-  name: string | null;
-  preview: string;
-  cwd: string;
-  updatedAt: number;
-  modelProvider: string;
-  turns?: Turn[];
-}
-
-interface Turn {
-  id: string;
-  items: ThreadItem[];
-}
-
-interface ThreadItem {
-  id?: string;
-  type: string;
-  text?: string;
-  content?: Array<{ type: string; text?: string }>;
-  command?: string;
-  cwd?: string;
-  status?: string;
-  aggregatedOutput?: string | null;
-  exitCode?: number | null;
-  changes?: unknown[];
-  summary?: string[];
-  tool?: "spawnAgent" | "sendInput" | "resumeAgent" | "wait" | "closeAgent";
-  prompt?: string | null;
-  receiverThreadIds?: string[];
-  agentThreadId?: string;
-  agentPath?: string;
-  kind?: string;
-}
-
-interface ChatMessage {
-  id: string;
-  role: "user" | "assistant";
-  text: string;
-  streaming?: boolean;
-}
-
-interface Activity {
-  id: string;
-  kind: "command" | "file" | "reasoning" | "agent";
-  title: string;
-  detail?: string;
-  status?: string;
-}
-
-interface Account {
-  type?: string;
-  email?: string | null;
-  planType?: string | null;
-}
-
-interface PendingApproval {
-  id: number | string;
-  method: string;
-  params: JsonObject;
-}
-
-interface AppSettings {
-  provider: Provider;
-  model: string;
-  permission: PermissionMode;
-  systemPrompt: string;
-  subagentsEnabled: boolean;
-  subagentMax: number;
-  reasoningEffort: ReasoningEffort;
-  ultra: boolean;
-  theme: ThemeName;
-}
+const EMPTY_MESSAGES: ChatMessage[] = [];
+const EMPTY_ACTIVITIES: Activity[] = [];
+const EMPTY_AGENTS: AgentRecord[] = [];
 
 const THEMES: Array<{ id: ThemeName; name: string; description: string; swatches: [string, string, string] }> = [
   { id: "kiwi", name: "OpenKiwi", description: "The original charcoal and electric green", swatches: ["#0c0d0f", "#171a1d", "#a7e26f"] },
@@ -170,12 +120,23 @@ const DEFAULT_SETTINGS: AppSettings = {
   model: "gpt-5.6-sol",
   permission: "ask",
   systemPrompt: "",
+  promptProfileId: "empty",
+  projectInstructionsEnabled: false,
   subagentsEnabled: false,
   subagentMax: 3,
   reasoningEffort: "medium",
   ultra: false,
+  serviceTier: null,
   theme: "kiwi",
+  notificationsEnabled: true,
+  terminalScrollback: 100_000,
 };
+
+const DEFAULT_PROMPT_PROFILES: PromptProfile[] = [
+  { id: "empty", name: "Empty", prompt: "", builtIn: true },
+  { id: "concise", name: "Concise builder", prompt: "Be concise, make progress autonomously, verify important changes, and clearly report results.", builtIn: true },
+  { id: "reviewer", name: "Careful reviewer", prompt: "Prioritize correctness, security, and maintainability. Inspect evidence before conclusions and flag uncertainty explicitly.", builtIn: true },
+];
 
 const initialProjects = loadStored<Project[]>("kiwi.projects", []).sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
 const initialWorkspaceMode: WorkspaceMode = loadStored<WorkspaceMode>("kiwi.workspaceMode", initialProjects.length ? "project" : "chat");
@@ -255,16 +216,21 @@ export default function App() {
   const [chatWorkspacePath, setChatWorkspacePath] = useState("");
   const [threads, setThreads] = useState<Thread[]>([]);
   const [activeThread, setActiveThread] = useState<Thread | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [activities, setActivities] = useState<Activity[]>([]);
   const [draft, setDraft] = useState("");
+  const [startingTurn, setStartingTurn] = useState(false);
   const [settings, setSettings] = useState<AppSettings>(initialSettings);
+  const [promptProfiles, setPromptProfiles] = useState<PromptProfile[]>(() => loadStored("kiwi.promptProfiles", DEFAULT_PROMPT_PROFILES));
+  const [customAgents, setCustomAgents] = useState<CustomAgentProfile[]>(() => loadStored("kiwi.customAgents", []));
+  const [projectActions, setProjectActions] = useState<ProjectAction[]>(() => loadStored("kiwi.projectActions", []));
+  const [scheduledTasks, setScheduledTasks] = useState<ScheduledTask[]>(() => loadStored("kiwi.scheduledTasks", []));
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [threadSearch, setThreadSearch] = useState("");
+  const [pinnedThreadIds, setPinnedThreadIds] = useState<string[]>(() => loadStored("kiwi.pinnedThreads", []));
   const [renamingThreadId, setRenamingThreadId] = useState<string | null>(null);
   const [threadNameDraft, setThreadNameDraft] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [permissionOpen, setPermissionOpen] = useState(false);
-  const [running, setRunning] = useState(false);
   const [status, setStatus] = useState("Checking runtime");
   const [error, setError] = useState<string | null>(null);
   const [runtimeStatus, setRuntimeStatus] = useState<CodexRuntimeStatus | null>(null);
@@ -275,19 +241,16 @@ export default function App() {
   const [account, setAccount] = useState<Account | null>(null);
   const threadProjectBindingsRef = useRef<Record<string, string> | null>(null);
   const [openRouterReady, setOpenRouterReady] = useState(false);
-  const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const [studioOpen, setStudioOpen] = useState(false);
   const [studioTab, setStudioTab] = useState<StudioTab>("review");
-  const [diff, setDiff] = useState("");
   const [approvedDiff, setApprovedDiff] = useState(false);
-  const [agentRecords, setAgentRecords] = useState<AgentRecord[]>([]);
   const [terminalCommand, setTerminalCommand] = useState("");
   const [terminalOutput, setTerminalOutput] = useState("");
   const [terminalRunning, setTerminalRunning] = useState(false);
   const [terminalProcessId, setTerminalProcessId] = useState<string | null>(null);
+  const terminalSizeRef = useRef({ cols: 100, rows: 30 });
   const [checkpoints, setCheckpoints] = useState<CheckpointRecord[]>(() => loadStored("kiwi.checkpoints", []));
   const [attachments, setAttachments] = useState<AttachmentRecord[]>([]);
-  const [tokenUsage, setTokenUsage] = useState<TokenUsageView | null>(null);
   const [rateSummary, setRateSummary] = useState("");
   const [skills, setSkills] = useState<SkillView[]>([]);
   const [mcpServers, setMcpServers] = useState<McpView[]>([]);
@@ -298,7 +261,6 @@ export default function App() {
   const [openRouterModelsLoading, setOpenRouterModelsLoading] = useState(false);
   const [openRouterModelsError, setOpenRouterModelsError] = useState("");
   const composerRef = useRef<HTMLTextAreaElement>(null);
-  const endRef = useRef<HTMLDivElement>(null);
   if (threadProjectBindingsRef.current === null) {
     threadProjectBindingsRef.current = loadStored("kiwi.threadProjects", {});
   }
@@ -310,6 +272,26 @@ export default function App() {
   const activeProject = workspaceMode === "project" ? selectedProject : null;
   const chatWorkspace = useMemo<Project | null>(() => chatWorkspacePath ? ({ id: "openkiwi-normal-chats", name: "Chats", path: chatWorkspacePath, isChat: true }) : null, [chatWorkspacePath]);
   const activeWorkspace = workspaceMode === "chat" ? chatWorkspace : activeProject;
+  const activeThreadId = activeThread?.id ?? null;
+  const messages = useTaskStore((state) => activeThreadId ? state.tasks[activeThreadId]?.messages ?? EMPTY_MESSAGES : EMPTY_MESSAGES);
+  const activities = useTaskStore((state) => activeThreadId ? state.tasks[activeThreadId]?.activities ?? EMPTY_ACTIVITIES : EMPTY_ACTIVITIES);
+  const diff = useTaskStore((state) => activeThreadId ? state.tasks[activeThreadId]?.diff ?? "" : "");
+  const agentRecords = useTaskStore((state) => activeThreadId ? state.tasks[activeThreadId]?.agents ?? EMPTY_AGENTS : EMPTY_AGENTS);
+  const tokenUsage = useTaskStore((state) => activeThreadId ? state.tasks[activeThreadId]?.usage ?? null : null);
+  const taskStatus = useTaskStore((state) => activeThreadId ? state.statuses[activeThreadId] ?? "idle" : "idle");
+  const running = startingTurn || taskStatus === "starting" || taskStatus === "running";
+  const pendingApproval = useTaskStore((state) => {
+    let earliest: PendingApproval | null = null;
+    for (const task of Object.values(state.tasks)) {
+      const candidate = task.approvals[0];
+      if (candidate && (!earliest || candidate.receivedAt < earliest.receivedAt)) earliest = candidate;
+    }
+    return earliest;
+  });
+  const threadTasks = useTaskStore((state) => state.tasks);
+  const displayedThreads = useMemo(() => threads
+    .filter((thread) => `${thread.name ?? ""} ${thread.preview}`.toLowerCase().includes(threadSearch.toLowerCase()))
+    .sort((a, b) => Number(pinnedThreadIds.includes(b.id)) - Number(pinnedThreadIds.includes(a.id)) || b.updatedAt - a.updatedAt), [pinnedThreadIds, threadSearch, threads]);
 
   const persistSettings = useCallback((next: AppSettings) => {
     setSettings(next);
@@ -337,10 +319,17 @@ export default function App() {
       }
       return result;
     } catch (reason) {
-      const result: CodexRuntimeStatus = { available: false, source: null, path: null };
+      const result: CodexRuntimeStatus = {
+        available: false,
+        source: null,
+        path: null,
+        version: null,
+        compatible: false,
+        warning: null,
+      };
       setRuntimeStatus(result);
       setStatus("Setup required");
-      setError(String(reason));
+      setError(friendlyError(reason));
       if (showSetupWhenMissing) setRuntimeSetupOpen(true);
       return result;
     } finally {
@@ -354,14 +343,21 @@ export default function App() {
       return;
     }
     try {
-      const result = await rpc<{ data: Thread[] }>("thread/list", { cwd: project.path, limit: 100 });
+      const allThreads: Thread[] = [];
+      let cursor: string | null = null;
+      for (let page = 0; page < 20; page += 1) {
+        const result: { data: Thread[]; nextCursor?: string | null } = await rpc("thread/list", { cwd: project.path, limit: 100, cursor });
+        allThreads.push(...(result.data ?? []));
+        cursor = result.nextCursor ?? null;
+        if (!cursor) break;
+      }
       const projectPath = normalizedProjectPath(project.path);
-      setThreads((result.data ?? []).filter((thread) => {
+      setThreads(allThreads.filter((thread) => {
         const boundPath = threadProjectBindingsRef.current?.[thread.id];
         return normalizedProjectPath(boundPath || thread.cwd) === projectPath;
       }));
     } catch (reason) {
-      setError(String(reason));
+      setError(friendlyError(reason));
     }
   }, []);
 
@@ -375,14 +371,21 @@ export default function App() {
         setStatus("Ready");
       }
     } catch (reason) {
-      setError(String(reason));
+      setError(friendlyError(reason));
     }
   }, []);
 
   const refreshModels = useCallback(async () => {
     try {
-      const result = await rpc<{ data: RuntimeModel[] }>("model/list", { limit: 100, includeHidden: false });
-      setRuntimeModels(result.data ?? []);
+      const allModels: RuntimeModel[] = [];
+      let cursor: string | null = null;
+      for (let page = 0; page < 10; page += 1) {
+        const result: { data: RuntimeModel[]; nextCursor?: string | null } = await rpc("model/list", { limit: 100, includeHidden: false, cursor });
+        allModels.push(...(result.data ?? []));
+        cursor = result.nextCursor ?? null;
+        if (!cursor) break;
+      }
+      setRuntimeModels(allModels);
     } catch {
       setRuntimeModels([]);
     }
@@ -399,7 +402,7 @@ export default function App() {
       setOpenRouterModels(models);
       if (!models.length) setOpenRouterModelsError("OpenRouter returned an empty catalog");
     } catch (reason) {
-      setOpenRouterModelsError(String(reason));
+      setOpenRouterModelsError(friendlyError(reason));
     } finally {
       setOpenRouterModelsLoading(false);
     }
@@ -422,7 +425,7 @@ export default function App() {
       rpc<{ data: Array<{ name: string; tools?: Record<string, unknown>; authStatus?: string }> }>("mcpServerStatus/list", { detail: "full" }),
     ]);
     if (skillResult.status === "fulfilled") {
-      setSkills((skillResult.value.data ?? []).flatMap((entry) => entry.skills ?? []).filter((skill) => skill.enabled !== false).map((skill) => ({ name: skill.name, description: skill.description, path: skill.path })));
+      setSkills((skillResult.value.data ?? []).flatMap((entry) => entry.skills ?? []).map((skill) => ({ name: skill.name, description: skill.description, path: skill.path, enabled: skill.enabled !== false })));
     }
     if (mcpResult.status === "fulfilled") {
       setMcpServers((mcpResult.value.data ?? []).map((server) => ({ name: server.name, status: server.authStatus || "ready", tools: Object.keys(server.tools ?? {}).length })));
@@ -433,78 +436,55 @@ export default function App() {
     return rpc<{ exitCode: number; stdout: string; stderr: string }>("command/exec", { command, cwd, timeoutMs: 120000, sandboxPolicy: commandSandbox(settings.permission, cwd) });
   }, [settings.permission]);
 
-  const refreshDiff = useCallback(async () => {
-    if (!activeProject) return;
+  const refreshDiffFor = useCallback(async (threadId: string, projectPath: string) => {
     setApprovedDiff(false);
     try {
-      const result = await rpc<{ diff: string }>("gitDiffToRemote", { cwd: activeProject.path });
-      setDiff(result.diff ?? "");
+      const result = await rpc<{ diff: string }>("gitDiffToRemote", { cwd: projectPath });
+      useTaskStore.getState().setDiff(threadId, result.diff ?? "");
     } catch {
       try {
-        const result = await executeCommand(["git", "diff", "--no-ext-diff", "--"], activeProject.path);
-        setDiff(`${result.stdout}${result.stderr}`);
+        const result = await executeCommand(["git", "diff", "--no-ext-diff", "--"], projectPath);
+        useTaskStore.getState().setDiff(threadId, `${result.stdout}${result.stderr}`);
       } catch (reason) {
-        setError(String(reason));
+        setError(friendlyError(reason));
       }
     }
-  }, [activeProject, executeCommand]);
+  }, [executeCommand]);
 
-  const upsertAssistantDelta = useCallback((itemId: string, delta: string) => {
-    setMessages((current) => {
-      const index = current.findIndex((message) => message.id === itemId);
-      if (index === -1) {
-        return [...current, { id: itemId, role: "assistant", text: delta, streaming: true }];
-      }
-      return current.map((message, messageIndex) =>
-        messageIndex === index ? { ...message, text: message.text + delta, streaming: true } : message,
-      );
-    });
-  }, []);
+  const refreshDiff = useCallback(async () => {
+    if (!activeProject || !activeThreadId) return;
+    await refreshDiffFor(activeThreadId, activeProject.path);
+  }, [activeProject, activeThreadId, refreshDiffFor]);
 
-  const handleItem = useCallback((item: ThreadItem) => {
+  const handleItem = useCallback((threadId: string, item: ThreadItem) => {
+    const taskStore = useTaskStore.getState();
+    taskStore.ensureTask(threadId, threadProjectBindingsRef.current?.[threadId]);
     const id = item.id ?? crypto.randomUUID();
     if (item.type === "agentMessage" || item.type === "plan") {
-      setMessages((current) => {
-        const exists = current.some((message) => message.id === id);
-        const next = { id, role: "assistant" as const, text: item.text ?? "", streaming: false };
-        return exists ? current.map((message) => (message.id === id ? next : message)) : [...current, next];
-      });
+      taskStore.completeMessage(threadId, { id, role: "assistant", text: item.text ?? "", streaming: false });
       return;
     }
     if (item.type === "commandExecution") {
-      setActivities((current) => {
-        const activity: Activity = {
-          id,
-          kind: "command",
-          title: item.command ?? "Run command",
-          detail: item.aggregatedOutput ?? item.cwd,
-          status: item.status,
-        };
-        return current.some((entry) => entry.id === id)
-          ? current.map((entry) => (entry.id === id ? activity : entry))
-          : [...current, activity];
+      taskStore.upsertActivity(threadId, {
+        id,
+        kind: "command",
+        title: item.command ?? "Run command",
+        detail: item.aggregatedOutput ?? item.cwd,
+        status: item.status,
       });
       return;
     }
     if (item.type === "fileChange") {
-      setActivities((current) => {
-        const activity: Activity = {
-          id,
-          kind: "file",
-          title: `${item.changes?.length ?? 0} file change${item.changes?.length === 1 ? "" : "s"}`,
-          status: item.status,
-        };
-        return current.some((entry) => entry.id === id)
-          ? current.map((entry) => (entry.id === id ? activity : entry))
-          : [...current, activity];
+      taskStore.upsertActivity(threadId, {
+        id,
+        kind: "file",
+        title: `${item.changes?.length ?? 0} file change${item.changes?.length === 1 ? "" : "s"}`,
+        status: item.status,
       });
       return;
     }
     if (item.type === "reasoning" && item.summary?.length) {
-      setActivities((current) => [
-        ...current.filter((entry) => entry.id !== id),
-        { id, kind: "reasoning", title: item.summary?.join(" ") ?? "Thinking" },
-      ]);
+      taskStore.upsertActivity(threadId, { id, kind: "reasoning", title: item.summary.join(" ") });
       return;
     }
     if (item.type === "collabAgentToolCall") {
@@ -515,43 +495,32 @@ export default function App() {
         wait: "Wait for sub-agents",
         closeAgent: "Close sub-agent",
       };
-      setActivities((current) => {
-        const activity: Activity = {
-          id,
-          kind: "agent",
-          title: titles[item.tool ?? ""] ?? "Sub-agent activity",
-          detail: item.prompt ?? undefined,
-          status: item.status,
-        };
-        return current.some((entry) => entry.id === id)
-          ? current.map((entry) => (entry.id === id ? activity : entry))
-          : [...current, activity];
+      taskStore.upsertActivity(threadId, {
+        id,
+        kind: "agent",
+        title: titles[item.tool ?? ""] ?? "Sub-agent activity",
+        detail: item.prompt ?? undefined,
+        status: item.status,
       });
       if (item.receiverThreadIds?.length) {
-        setAgentRecords((current) => item.receiverThreadIds!.reduce((next, threadId) => {
-          const record: AgentRecord = { id: threadId, prompt: item.prompt ?? "Delegated task", status: item.status ?? "inProgress" };
-          return next.some((entry) => entry.id === threadId) ? next.map((entry) => entry.id === threadId ? { ...entry, ...record } : entry) : [...next, record];
-        }, current));
+        for (const childThreadId of item.receiverThreadIds) {
+          taskStore.upsertAgent(threadId, { id: childThreadId, prompt: item.prompt ?? "Delegated task", status: item.status ?? "inProgress" });
+          taskStore.ensureTask(childThreadId, threadProjectBindingsRef.current?.[threadId]);
+        }
       }
       return;
     }
     if (item.type === "subAgentActivity") {
       const action = item.kind === "started" ? "started" : item.kind === "interrupted" ? "interrupted" : "working";
-      setActivities((current) => [
-        ...current.filter((entry) => entry.id !== id),
-        {
-          id,
-          kind: "agent",
-          title: `Sub-agent ${action}`,
-          detail: item.agentPath || item.agentThreadId,
-          status: item.kind,
-        },
-      ]);
+      taskStore.upsertActivity(threadId, {
+        id,
+        kind: "agent",
+        title: `Sub-agent ${action}`,
+        detail: item.agentPath || item.agentThreadId,
+        status: item.kind,
+      });
       if (item.agentThreadId) {
-        setAgentRecords((current) => {
-          const record: AgentRecord = { id: item.agentThreadId!, prompt: "Delegated task", status: item.kind ?? "working", path: item.agentPath };
-          return current.some((entry) => entry.id === item.agentThreadId) ? current.map((entry) => entry.id === item.agentThreadId ? { ...entry, ...record, prompt: entry.prompt } : entry) : [...current, record];
-        });
+        taskStore.upsertAgent(threadId, { id: item.agentThreadId, prompt: "Delegated task", status: item.kind ?? "working", path: item.agentPath });
       }
     }
   }, []);
@@ -573,27 +542,46 @@ export default function App() {
 
       const method = event.method ?? "";
       const params = event.params ?? {};
-      if (event.id !== undefined && (method.includes("requestApproval") || method.endsWith("Approval"))) {
-        setPendingApproval({ id: event.id, method, params });
+      const eventThreadId = typeof params.threadId === "string"
+        ? params.threadId
+        : useTaskStore.getState().activeThreadId ?? "runtime";
+      if (event.id !== undefined && method === "currentTime/read") {
+        void respond(event.id, { currentTimeAt: Math.floor(Date.now() / 1000) });
+        return;
+      }
+      if (event.id !== undefined && (
+        method.includes("requestApproval")
+        || method.endsWith("Approval")
+        || method === "item/tool/requestUserInput"
+        || method === "mcpServer/elicitation/request"
+      )) {
+        useTaskStore.getState().enqueueApproval({
+          id: event.id,
+          method,
+          params,
+          threadId: eventThreadId,
+          receivedAt: Date.now(),
+        });
+        void auditEvent("approval.requested", { method, params }, eventThreadId).catch(() => {});
         return;
       }
       if (method === "item/agentMessage/delta") {
-        upsertAssistantDelta(String(params.itemId), String(params.delta ?? ""));
+        useTaskStore.getState().queueAssistantDelta(eventThreadId, String(params.itemId), String(params.delta ?? ""));
         return;
       }
       if (method === "item/started" || method === "item/completed") {
-        if (params.item && typeof params.item === "object") handleItem(params.item as ThreadItem);
+        if (params.item && typeof params.item === "object") handleItem(eventThreadId, params.item as ThreadItem);
         return;
       }
       if (method === "turn/diff/updated") {
-        setDiff(String(params.diff ?? ""));
+        useTaskStore.getState().setDiff(eventThreadId, String(params.diff ?? ""));
         setApprovedDiff(false);
         return;
       }
       if (method === "thread/tokenUsage/updated") {
         const usage = params.tokenUsage as { total?: Partial<TokenUsageView>; modelContextWindow?: number | null } | undefined;
         if (usage?.total) {
-          setTokenUsage({
+          useTaskStore.getState().setUsage(eventThreadId, {
             totalTokens: Number(usage.total.totalTokens ?? 0),
             inputTokens: Number(usage.total.inputTokens ?? 0),
             cachedInputTokens: Number(usage.total.cachedInputTokens ?? 0),
@@ -605,7 +593,8 @@ export default function App() {
         return;
       }
       if (method === "command/exec/outputDelta") {
-        setTerminalOutput((current) => current + decodeBase64Utf8(params.deltaBase64));
+        const delta = decodeBase64Utf8(params.deltaBase64);
+        setTerminalOutput((current) => `${current}${delta}`.slice(-settings.terminalScrollback));
         return;
       }
       if (method === "account/rateLimits/updated") {
@@ -614,8 +603,9 @@ export default function App() {
         return;
       }
       if (method === "turn/started") {
-        setRunning(true);
-        setStatus("Working");
+        useTaskStore.getState().setTaskStatus(eventThreadId, "running");
+        void auditEvent("turn.started", {}, eventThreadId).catch(() => {});
+        if (useTaskStore.getState().activeThreadId === eventThreadId) setStatus("Working");
         return;
       }
       if (method === "turn/completed") {
@@ -623,9 +613,33 @@ export default function App() {
           const completedTurn = params.turn as unknown as Turn;
           setActiveThread((current) => current && current.id === String(params.threadId) ? { ...current, turns: [...(current.turns ?? []).filter((turn) => turn.id !== completedTurn.id), completedTurn] } : current);
         }
-        setRunning(false);
-        setStatus("Ready");
-        void refreshDiff();
+        useTaskStore.getState().setTaskStatus(eventThreadId, "completed");
+        void auditEvent("turn.completed", {}, eventThreadId).catch(() => {});
+        if (settings.notificationsEnabled && useTaskStore.getState().activeThreadId !== eventThreadId) {
+          void (async () => {
+            let granted = await isPermissionGranted();
+            if (!granted) granted = (await requestPermission()) === "granted";
+            if (granted) sendNotification({ title: "OpenKiwi task complete", body: "A background coding task finished." });
+          })().catch(() => {});
+        }
+        if (useTaskStore.getState().activeThreadId === eventThreadId) setStatus("Ready");
+        const projectPath = threadProjectBindingsRef.current?.[eventThreadId];
+        if (projectPath && !projectPath.includes("normal-chats")) void refreshDiffFor(eventThreadId, projectPath);
+        return;
+      }
+      if (method === "thread/status/changed") {
+        const statusValue = params.status as { type?: string } | undefined;
+        const nextStatus = statusValue?.type === "active" ? "running" : statusValue?.type === "systemError" ? "error" : "idle";
+        useTaskStore.getState().setTaskStatus(eventThreadId, nextStatus);
+        return;
+      }
+      if (method === "error" || method === "warning" || method === "guardianWarning" || method === "configWarning") {
+        useTaskStore.getState().upsertActivity(eventThreadId, {
+          id: `${method}-${Date.now()}`,
+          kind: "warning",
+          title: String(params.message ?? params.error ?? "Runtime warning"),
+          detail: typeof params.details === "string" ? params.details : undefined,
+        });
         return;
       }
       if (method === "account/updated") {
@@ -640,10 +654,10 @@ export default function App() {
       stop = unlisten;
     });
     return () => stop?.();
-  }, [handleItem, refreshAccount, refreshDiff, upsertAssistantDelta]);
+  }, [handleItem, refreshAccount, refreshDiffFor, settings.notificationsEnabled, settings.terminalScrollback]);
 
   useEffect(() => {
-    void getNormalChatWorkspace().then(setChatWorkspacePath).catch((reason) => setError(String(reason)));
+    void getNormalChatWorkspace().then(setChatWorkspacePath).catch((reason) => setError(friendlyError(reason)));
     void checkRuntime(true).then((runtime) => {
       if (!runtime.available) return;
       void refreshAccount();
@@ -655,6 +669,17 @@ export default function App() {
   }, [checkRuntime, refreshAccount, refreshModels, refreshOpenRouterModels, refreshUsage]);
 
   useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setCommandPaletteOpen((open) => !open);
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  useEffect(() => {
     if (runtimeStatus?.available) {
       void loadThreads(activeWorkspace);
       if (activeProject) void refreshTools(activeProject);
@@ -662,19 +687,11 @@ export default function App() {
       setThreads([]);
     }
     setActiveThread(null);
-    setMessages([]);
-    setActivities([]);
+    useTaskStore.getState().setActiveThread(null);
     setAttachments([]);
-    setAgentRecords([]);
-    setTokenUsage(null);
-    setDiff("");
     setApprovedDiff(false);
     if (!activeProject) setStudioOpen(false);
   }, [activeProject, activeWorkspace, loadThreads, refreshTools, runtimeStatus?.available]);
-
-  useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [activities, messages, running]);
 
   const addProject = async () => {
     const selected = await open({ directory: true, multiple: false, title: "Choose a project folder" });
@@ -736,22 +753,18 @@ export default function App() {
       });
       bindThreadToProject(result.thread.id, activeWorkspace.path);
       setActiveThread(result.thread);
-      setMessages(messagesFromTurns(result.thread.turns));
-      setActivities([]);
+      useTaskStore.getState().hydrateTask(result.thread.id, messagesFromTurns(result.thread.turns), activeWorkspace.path);
+      useTaskStore.getState().setActiveThread(result.thread.id);
       setStatus("Ready");
     } catch (reason) {
-      setError(String(reason));
+      setError(friendlyError(reason));
       setStatus("Ready");
     }
   };
 
   const newThread = () => {
     setActiveThread(null);
-    setMessages([]);
-    setActivities([]);
-    setAgentRecords([]);
-    setTokenUsage(null);
-    setDiff("");
+    useTaskStore.getState().setActiveThread(null);
     setDraft("");
     setError(null);
     requestAnimationFrame(() => composerRef.current?.focus());
@@ -759,7 +772,7 @@ export default function App() {
 
   const sendMessage = async () => {
     const text = draft.trim();
-    if (!text || !activeWorkspace || running) return;
+    if (!text || !activeWorkspace) return;
     if (!runtimeStatus?.available) {
       setRuntimeSetupOpen(true);
       return;
@@ -778,14 +791,27 @@ export default function App() {
       return;
     }
 
+    if (running && activeThread) {
+      setDraft("");
+      setError(null);
+      useTaskStore.getState().appendUserMessage(activeThread.id, { id: `local-${crypto.randomUUID()}`, role: "user", text });
+      try {
+        await rpc("turn/steer", {
+          threadId: activeThread.id,
+          input: [{ type: "text", text, text_elements: [] }],
+        });
+        setStatus("Direction added");
+      } catch (reason) {
+        setDraft(text);
+        setError(friendlyError(reason));
+      }
+      return;
+    }
+
     setDraft("");
     setError(null);
-    setRunning(true);
+    setStartingTurn(true);
     setStatus("Starting");
-    setMessages((current) => [
-      ...current,
-      { id: `local-${crypto.randomUUID()}`, role: "user", text },
-    ]);
 
     try {
       const fileContext = attachments.filter((item) => item.kind === "file").map((item) => `@${item.path}`).join("\n");
@@ -805,19 +831,29 @@ export default function App() {
           baseInstructions: settings.systemPrompt,
           developerInstructions: "",
           config: {
-            project_doc_max_bytes: 0,
+            project_doc_max_bytes: settings.projectInstructionsEnabled ? 32_768 : 0,
             project_doc_fallback_filenames: [],
             developer_instructions: "",
             model_reasoning_effort: settings.ultra ? "ultra" : settings.reasoningEffort,
             agents: {
               max_threads: settings.subagentMax,
               max_depth: 1,
+              ...Object.fromEntries(customAgents.filter((agent) => agent.enabled).map((agent) => [
+                agent.name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-") || agent.id,
+                {
+                  description: agent.description,
+                  instructions: agent.instructions,
+                  model: agent.model,
+                  model_reasoning_effort: agent.reasoningEffort,
+                },
+              ])),
             },
             features: {
               multi_agent: settings.subagentsEnabled,
             },
           },
           serviceName: activeWorkspace.isChat ? "OpenKiwi Chat" : "OpenKiwi",
+          serviceTier: settings.serviceTier,
         };
         if (settings.model.trim()) startParams.model = settings.model.trim();
         if (settings.provider === "openrouter") startParams.modelProvider = "openrouter";
@@ -826,7 +862,13 @@ export default function App() {
         threadId = result.thread.id;
         bindThreadToProject(result.thread.id, activeWorkspace.path);
         setActiveThread(result.thread);
+        useTaskStore.getState().ensureTask(result.thread.id, activeWorkspace.path);
+        useTaskStore.getState().setActiveThread(result.thread.id);
       }
+
+      useTaskStore.getState().ensureTask(threadId, activeWorkspace.path);
+      useTaskStore.getState().setTaskStatus(threadId, "starting");
+      useTaskStore.getState().appendUserMessage(threadId, { id: `local-${crypto.randomUUID()}`, role: "user", text });
 
       await rpc("turn/start", {
         threadId,
@@ -836,13 +878,28 @@ export default function App() {
         sandboxPolicy: commandSandbox(settings.permission, activeWorkspace.path),
         model: settings.model.trim() || undefined,
         effort: settings.ultra ? "ultra" : settings.reasoningEffort,
+        serviceTier: settings.serviceTier,
       });
+      setStartingTurn(false);
       setAttachments([]);
       void loadThreads(activeWorkspace);
     } catch (reason) {
-      setRunning(false);
+      setStartingTurn(false);
+      if (activeThread?.id) useTaskStore.getState().setTaskStatus(activeThread.id, "error", friendlyError(reason));
       setStatus("Ready");
-      setError(String(reason));
+      setError(friendlyError(reason));
+    }
+  };
+
+  const stopTurn = async () => {
+    if (!activeThread || !running) return;
+    try {
+      await rpc("turn/interrupt", { threadId: activeThread.id });
+      useTaskStore.getState().setTaskStatus(activeThread.id, "interrupted");
+      setStartingTurn(false);
+      setStatus("Stopped");
+    } catch (reason) {
+      setError(friendlyError(reason));
     }
   };
 
@@ -860,7 +917,7 @@ export default function App() {
       if (activeWorkspace) await loadThreads(activeWorkspace);
       if (activeProject) await refreshTools(activeProject);
     } catch (reason) {
-      setError(String(reason));
+      setError(friendlyError(reason));
     }
   };
 
@@ -884,20 +941,21 @@ export default function App() {
       await openUrl(result.authUrl);
       window.setTimeout(() => void refreshAccount(), 1800);
     } catch (reason) {
-      setError(String(reason));
+      setError(friendlyError(reason));
       setAuthRequiredOpen(true);
     } finally {
       setLoginStarting(false);
     }
   };
 
-  const answerApproval = async (decision: "accept" | "acceptForSession" | "decline") => {
+  const answerApproval = async (result: JsonObject) => {
     if (!pendingApproval) return;
     try {
-      await respond(pendingApproval.id, { decision });
-      setPendingApproval(null);
+      await respond(pendingApproval.id, result);
+      void auditEvent("approval.resolved", { method: pendingApproval.method, responseRecorded: true }, pendingApproval.threadId).catch(() => {});
+      useTaskStore.getState().resolveApproval(pendingApproval.threadId, pendingApproval.id);
     } catch (reason) {
-      setError(String(reason));
+      setError(friendlyError(reason));
     }
   };
 
@@ -915,7 +973,7 @@ export default function App() {
       setThreads((current) => current.map((entry) => entry.id === thread.id ? { ...entry, name } : entry));
       setActiveThread((current) => current?.id === thread.id ? { ...current, name } : current);
     } catch (reason) {
-      setError(String(reason));
+      setError(friendlyError(reason));
     }
   };
 
@@ -928,8 +986,14 @@ export default function App() {
       setThreads((current) => current.filter((entry) => entry.id !== thread.id));
       void loadThreads(activeWorkspace);
     } catch (reason) {
-      setError(String(reason));
+      setError(friendlyError(reason));
     }
+  };
+
+  const toggleThreadPin = (threadId: string) => {
+    const next = pinnedThreadIds.includes(threadId) ? pinnedThreadIds.filter((id) => id !== threadId) : [...pinnedThreadIds, threadId];
+    setPinnedThreadIds(next);
+    storeValue("kiwi.pinnedThreads", next);
   };
 
   const openStudio = (tab: StudioTab) => {
@@ -942,23 +1006,25 @@ export default function App() {
     try {
       await rpc("review/start", { threadId: activeThread.id, target: { type: "uncommittedChanges" }, delivery: "inline" });
       setStatus("Reviewing");
-    } catch (reason) { setError(String(reason)); }
+    } catch (reason) { setError(friendlyError(reason)); }
   };
 
   const openAgent = async (threadId: string) => {
     try {
       const result = await rpc<{ thread: Thread }>("thread/read", { threadId, includeTurns: true });
       setActiveThread(result.thread);
-      setMessages(messagesFromTurns(result.thread.turns));
+      useTaskStore.getState().hydrateTask(result.thread.id, messagesFromTurns(result.thread.turns), result.thread.cwd);
+      useTaskStore.getState().setActiveThread(result.thread.id);
       setStudioOpen(false);
-    } catch (reason) { setError(String(reason)); }
+    } catch (reason) { setError(friendlyError(reason)); }
   };
 
   const stopAgent = async (threadId: string) => {
     try {
       await rpc("turn/interrupt", { threadId });
-      setAgentRecords((current) => current.map((agent) => agent.id === threadId ? { ...agent, status: "interrupted" } : agent));
-    } catch (reason) { setError(String(reason)); }
+      useTaskStore.getState().setTaskStatus(threadId, "interrupted");
+      if (activeThreadId) useTaskStore.getState().upsertAgent(activeThreadId, { id: threadId, prompt: "Delegated task", status: "interrupted" });
+    } catch (reason) { setError(friendlyError(reason)); }
   };
 
   const runTerminal = async () => {
@@ -973,7 +1039,10 @@ export default function App() {
       const result = await rpc<{ exitCode: number; stdout: string; stderr: string }>("command/exec", {
         command: ["/bin/zsh", "-lc", command],
         processId,
+        tty: true,
         streamStdoutStderr: true,
+        streamStdin: true,
+        size: terminalSizeRef.current,
         cwd: activeProject.path,
         timeoutMs: 300000,
         sandboxPolicy: commandSandbox(settings.permission, activeProject.path),
@@ -981,7 +1050,7 @@ export default function App() {
       if (result.stdout || result.stderr) setTerminalOutput((current) => current + result.stdout + result.stderr);
       setTerminalOutput((current) => `${current}\n[exit ${result.exitCode}]\n`);
     } catch (reason) {
-      setTerminalOutput((current) => `${current}\n${String(reason)}\n`);
+      setTerminalOutput((current) => `${current}\n${friendlyError(reason)}\n`);
     } finally {
       setTerminalRunning(false);
       setTerminalProcessId(null);
@@ -990,8 +1059,23 @@ export default function App() {
 
   const stopTerminal = async () => {
     if (!terminalProcessId) return;
-    try { await rpc("command/exec/terminate", { processId: terminalProcessId }); } catch (reason) { setError(String(reason)); }
+    try { await rpc("command/exec/terminate", { processId: terminalProcessId }); } catch (reason) { setError(friendlyError(reason)); }
   };
+
+  const writeTerminal = useCallback((value: string) => {
+    if (!terminalProcessId || !terminalRunning) return;
+    const bytes = new TextEncoder().encode(value);
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    void rpc("command/exec/write", { processId: terminalProcessId, deltaBase64: btoa(binary) })
+      .catch((reason) => setError(friendlyError(reason)));
+  }, [terminalProcessId, terminalRunning]);
+
+  const resizeTerminal = useCallback((columns: number, rows: number) => {
+    terminalSizeRef.current = { cols: columns, rows };
+    if (!terminalProcessId || !terminalRunning) return;
+    void rpc("command/exec/resize", { processId: terminalProcessId, size: { cols: columns, rows } }).catch(() => {});
+  }, [terminalProcessId, terminalRunning]);
 
   const createCheckpoint = () => {
     if (!activeThread) return;
@@ -1016,11 +1100,11 @@ export default function App() {
       });
       if (activeWorkspace) bindThreadToProject(result.thread.id, activeWorkspace.path);
       setActiveThread(result.thread);
-      setMessages(messagesFromTurns(result.thread.turns));
-      setActivities([]);
+      useTaskStore.getState().hydrateTask(result.thread.id, messagesFromTurns(result.thread.turns), activeWorkspace?.path);
+      useTaskStore.getState().setActiveThread(result.thread.id);
       setStudioOpen(false);
       void loadThreads(activeWorkspace);
-    } catch (reason) { setError(String(reason)); }
+    } catch (reason) { setError(friendlyError(reason)); }
   };
 
   const rollbackTurn = async () => {
@@ -1028,9 +1112,8 @@ export default function App() {
     try {
       const result = await rpc<{ thread: Thread }>("thread/rollback", { threadId: activeThread.id, numTurns: 1 });
       setActiveThread(result.thread);
-      setMessages(messagesFromTurns(result.thread.turns));
-      setActivities([]);
-    } catch (reason) { setError(String(reason)); }
+      useTaskStore.getState().hydrateTask(result.thread.id, messagesFromTurns(result.thread.turns), activeWorkspace?.path);
+    } catch (reason) { setError(friendlyError(reason)); }
   };
 
   const createWorktree = async () => {
@@ -1048,7 +1131,7 @@ export default function App() {
       setActiveProjectId(project.id);
       setWorkspaceMode("project");
       storeValue("kiwi.workspaceMode", "project");
-    } catch (reason) { setError(String(reason)); }
+    } catch (reason) { setError(friendlyError(reason)); }
   };
 
   const addAttachment = async () => {
@@ -1080,10 +1163,116 @@ export default function App() {
       const result = await executeCommand(command, activeProject.path);
       const combined = `${result.stdout}${result.stderr || ""}`;
       setGitOutput(combined.includes("not a git repository") ? "This project folder is not a Git repository yet. Initialize Git from the terminal to enable these workflows." : `$ ${command.join(" ")}\n${combined}\n[exit ${result.exitCode}]`);
-      if (action === "diff") setDiff(result.stdout);
+      if (action === "diff" && activeThreadId) useTaskStore.getState().setDiff(activeThreadId, result.stdout);
       if (action === "commit" && result.exitCode === 0) setGitCommitMessage("");
-    } catch (reason) { setGitOutput(String(reason)); }
+    } catch (reason) { setGitOutput(friendlyError(reason)); }
   };
+
+  const runProjectAction = async (action: ProjectAction) => {
+    if (!activeProject) return;
+    setStudioTab("terminal");
+    setTerminalOutput((current) => `${current}${current ? "\n" : ""}$ ${action.command}\n`);
+    try {
+      const result = await executeCommand(["/bin/zsh", "-lc", action.command], activeProject.path);
+      setTerminalOutput((current) => `${current}${result.stdout}${result.stderr}\n[exit ${result.exitCode}]\n`);
+      void auditEvent("action.completed", { actionId: action.id, command: action.command, exitCode: result.exitCode }, activeThreadId ?? undefined).catch(() => {});
+    } catch (reason) {
+      setTerminalOutput((current) => `${current}${friendlyError(reason)}\n`);
+    }
+  };
+
+  const runGitPathAction = async (action: "stage" | "revert", path: string) => {
+    if (!activeProject) return;
+    if (action === "revert" && !window.confirm(`Revert changes to ${path}?`)) return;
+    const command = action === "stage" ? ["git", "add", "--", path] : ["git", "restore", "--staged", "--worktree", "--", path];
+    try {
+      const result = await executeCommand(command, activeProject.path);
+      setGitOutput(`$ ${command.join(" ")}\n${result.stdout}${result.stderr}\n[exit ${result.exitCode}]`);
+      if (activeThreadId) await refreshDiffFor(activeThreadId, activeProject.path);
+    } catch (reason) { setError(friendlyError(reason)); }
+  };
+
+  const toggleSkill = async (skill: SkillView) => {
+    try {
+      await rpc("skills/config/write", { path: skill.path ?? null, name: skill.path ? null : skill.name, enabled: skill.enabled === false });
+      await refreshTools(activeProject);
+    } catch (reason) { setError(friendlyError(reason)); }
+  };
+
+  const connectMcp = async (server: McpView) => {
+    try {
+      const result = await rpc<{ authorizationUrl: string }>("mcpServer/oauth/login", { name: server.name, threadId: activeThreadId });
+      if (result.authorizationUrl) await openUrl(result.authorizationUrl);
+    } catch (reason) { setError(friendlyError(reason)); }
+  };
+
+  const scheduledRunningRef = useRef(new Set<string>());
+  const runScheduledTask = useCallback(async (scheduled: ScheduledTask) => {
+    if (scheduledRunningRef.current.has(scheduled.id) || !runtimeStatus?.available) return;
+    const project = projects.find((item) => item.id === scheduled.projectId);
+    if (!project || (settings.provider === "openai" && account?.type !== "chatgpt") || (settings.provider === "openrouter" && !openRouterReady)) return;
+    scheduledRunningRef.current.add(scheduled.id);
+    try {
+      const sandbox = settings.permission === "read-only" ? "read-only" : settings.permission === "full" ? "danger-full-access" : "workspace-write";
+      const approvalPolicy = settings.permission === "ask" ? "on-request" : "never";
+      const started = await rpc<{ thread: Thread }>("thread/start", {
+        cwd: project.path,
+        runtimeWorkspaceRoots: [project.path],
+        sandbox,
+        approvalPolicy,
+        baseInstructions: settings.systemPrompt,
+        developerInstructions: "",
+        model: settings.model || undefined,
+        modelProvider: settings.provider === "openrouter" ? "openrouter" : undefined,
+        serviceTier: settings.serviceTier,
+        config: {
+          project_doc_max_bytes: settings.projectInstructionsEnabled ? 32_768 : 0,
+          developer_instructions: "",
+          model_reasoning_effort: settings.ultra ? "ultra" : settings.reasoningEffort,
+          agents: { max_threads: settings.subagentMax, max_depth: 1 },
+          features: { multi_agent: settings.subagentsEnabled },
+        },
+      });
+      bindThreadToProject(started.thread.id, project.path);
+      useTaskStore.getState().ensureTask(started.thread.id, project.path);
+      useTaskStore.getState().appendUserMessage(started.thread.id, { id: `scheduled-${crypto.randomUUID()}`, role: "user", text: scheduled.prompt });
+      useTaskStore.getState().setTaskStatus(started.thread.id, "starting");
+      await rpc("turn/start", {
+        threadId: started.thread.id,
+        input: [{ type: "text", text: scheduled.prompt, text_elements: [] }],
+        cwd: project.path,
+        runtimeWorkspaceRoots: [project.path],
+        sandboxPolicy: commandSandbox(settings.permission, project.path),
+        model: settings.model || undefined,
+        effort: settings.ultra ? "ultra" : settings.reasoningEffort,
+        serviceTier: settings.serviceTier,
+      });
+      const next = scheduledTasks.map((item) => item.id === scheduled.id ? { ...item, lastRunAt: Date.now(), lastThreadId: started.thread.id, nextRunAt: Date.now() + item.intervalMinutes * 60_000 } : item);
+      setScheduledTasks(next);
+      storeValue("kiwi.scheduledTasks", next);
+      void auditEvent("schedule.started", { scheduleId: scheduled.id, projectId: project.id }, started.thread.id).catch(() => {});
+      if (activeProject?.id === project.id) void loadThreads(project);
+    } catch (reason) {
+      const next = scheduledTasks.map((item) => item.id === scheduled.id ? { ...item, nextRunAt: Date.now() + 5 * 60_000 } : item);
+      setScheduledTasks(next);
+      storeValue("kiwi.scheduledTasks", next);
+      void auditEvent("schedule.failed", { scheduleId: scheduled.id, error: String(reason) }).catch(() => {});
+    } finally {
+      scheduledRunningRef.current.delete(scheduled.id);
+    }
+  }, [account?.type, activeProject?.id, bindThreadToProject, loadThreads, openRouterReady, projects, runtimeStatus?.available, scheduledTasks, settings]);
+
+  useEffect(() => {
+    const check = () => {
+      const now = Date.now();
+      for (const scheduled of scheduledTasks) {
+        if (scheduled.enabled && scheduled.nextRunAt <= now) void runScheduledTask(scheduled);
+      }
+    };
+    check();
+    const timer = window.setInterval(check, 30_000);
+    return () => window.clearInterval(timer);
+  }, [runScheduledTask, scheduledTasks]);
 
   return (
     <div className="app-shell" data-theme={settings.theme}>
@@ -1091,7 +1280,7 @@ export default function App() {
         <div className="sidebar-brand">
           <div className="brand-mark"><img src="/openkiwi-logo.png" alt="" /></div>
           <span>OpenKiwi</span>
-          <button className="icon-button subtle collapse-button" onClick={() => setSidebarOpen(false)} title="Hide sidebar">
+          <button className="icon-button subtle collapse-button" onClick={() => setSidebarOpen(false)} title="Hide sidebar" aria-label="Hide sidebar">
             <PanelLeftClose size={17} />
           </button>
         </div>
@@ -1124,7 +1313,7 @@ export default function App() {
         <div className="sidebar-section projects-section">
           <div className="section-label-row">
             <span className="section-label">Projects</span>
-            <button className="icon-button tiny" onClick={addProject} title="Add project"><Plus size={14} /></button>
+            <button className="icon-button tiny" onClick={addProject} title="Add project" aria-label="Add project"><Plus size={14} /></button>
           </div>
           <div className="project-list">
             {projects.map((project) => (
@@ -1142,10 +1331,10 @@ export default function App() {
                   <span>{project.name}</span>
                 </button>
                 <div className="project-actions">
-                  <button onClick={() => toggleProjectPin(project)} title={project.pinned ? "Unpin project" : "Pin project"}>
+                  <button onClick={() => toggleProjectPin(project)} title={project.pinned ? "Unpin project" : "Pin project"} aria-label={`${project.pinned ? "Unpin" : "Pin"} ${project.name}`}>
                     {project.pinned ? <PinOff size={12} /> : <Pin size={12} />}
                   </button>
-                  <button className="danger" onClick={() => removeProject(project)} title="Remove from OpenKiwi — files stay on your Mac">
+                  <button className="danger" onClick={() => removeProject(project)} title="Remove from OpenKiwi — files stay on your Mac" aria-label={`Remove ${project.name} from OpenKiwi`}>
                     <Trash2 size={12} />
                   </button>
                 </div>
@@ -1165,12 +1354,13 @@ export default function App() {
             <span className="section-label">{workspaceMode === "chat" ? "Chat threads" : "Project threads"}</span>
             {activeWorkspace && <span className="thread-count">{threads.length}</span>}
           </div>
+          {threads.length > 4 && <label className="thread-search"><Search size={11} /><input value={threadSearch} onChange={(event) => setThreadSearch(event.target.value)} placeholder="Filter threads…" /></label>}
           <div className={`thread-scope-hint ${workspaceMode}`}>
             {workspaceMode === "chat" ? <MessageSquare size={12} /> : <Folder size={12} />}
             <span>{workspaceMode === "chat" ? "Not tied to a project folder" : activeProject ? `Working in ${activeProject.name}` : "Select a project above"}</span>
           </div>
           <div className="thread-list">
-            {threads.map((thread) => (
+            {displayedThreads.map((thread) => (
               <div key={thread.id} className={`thread-row-wrap ${activeThread?.id === thread.id ? "active" : ""}`}>
                 {renamingThreadId === thread.id ? (
                   <div className="thread-rename-row">
@@ -1189,13 +1379,16 @@ export default function App() {
                   </div>
                 ) : (
                   <button className="thread-row" onClick={() => void selectThread(thread)}>
-                    <MessageSquare size={14} />
+                    {pinnedThreadIds.includes(thread.id) ? <Pin size={13} /> : <MessageSquare size={14} />}
                     <span>{thread.name || thread.preview || "Untitled thread"}</span>
+                    {(threadTasks[thread.id]?.status === "running" || threadTasks[thread.id]?.status === "starting") && <LoaderCircle className="spin thread-state" size={11} />}
+                    {threadTasks[thread.id]?.unread && <i className="thread-unread" />}
                   </button>
                 )}
                 <div className="thread-actions">
-                  <button onMouseDown={(event) => event.preventDefault()} onClick={() => startThreadRename(thread)} title="Rename thread"><Pencil size={12} /></button>
-                  <button className="danger" onMouseDown={(event) => event.preventDefault()} onClick={() => void deleteThread(thread)} title="Delete thread"><Trash2 size={12} /></button>
+                  <button onMouseDown={(event) => event.preventDefault()} onClick={() => toggleThreadPin(thread.id)} title={pinnedThreadIds.includes(thread.id) ? "Unpin thread" : "Pin thread"} aria-label={`${pinnedThreadIds.includes(thread.id) ? "Unpin" : "Pin"} ${thread.name || thread.preview || "thread"}`}><Pin size={12} /></button>
+                  <button onMouseDown={(event) => event.preventDefault()} onClick={() => startThreadRename(thread)} title="Rename thread" aria-label={`Rename ${thread.name || thread.preview || "thread"}`}><Pencil size={12} /></button>
+                  <button className="danger" onMouseDown={(event) => event.preventDefault()} onClick={() => void deleteThread(thread)} title="Delete thread" aria-label={`Delete ${thread.name || thread.preview || "thread"}`}><Trash2 size={12} /></button>
                 </div>
               </div>
             ))}
@@ -1216,7 +1409,7 @@ export default function App() {
         <header className="topbar">
           <div className="topbar-left">
             {!sidebarOpen && (
-              <button className="icon-button" onClick={() => setSidebarOpen(true)} title="Show sidebar">
+              <button className="icon-button" onClick={() => setSidebarOpen(true)} title="Show sidebar" aria-label="Show sidebar">
                 <PanelLeftOpen size={18} />
               </button>
             )}
@@ -1226,17 +1419,19 @@ export default function App() {
             </div>
           </div>
           <div className="topbar-right">
+            <button className="command-palette-trigger" onClick={() => setCommandPaletteOpen(true)} aria-label="Open command palette"><Command size={13} /><span>Search</span><kbd>⌘K</kbd></button>
             <div className="runtime-status">
               {running ? <LoaderCircle className="spin" size={13} /> : <Circle size={8} fill="currentColor" />}
               <span>{status}</span>
             </div>
-            <button className="provider-pill" onClick={() => setSettingsOpen(true)}>
+            <button className="provider-pill" onClick={() => setSettingsOpen(true)} aria-label={`Configure ${settings.provider === "openai" ? "OpenAI" : "OpenRouter"} provider`}>
               <span className={`provider-dot ${settings.provider}`} />
               {settings.provider === "openai" ? "OpenAI" : "OpenRouter"}
               {settings.model && <small>{settings.model}</small>}
             </button>
-            <button className={`icon-button studio-toggle ${studioOpen ? "active" : ""}`} onClick={() => studioOpen ? setStudioOpen(false) : openStudio(studioTab)} title={activeProject ? "Open project workspace tools" : "Workspace tools are available inside projects"} disabled={!activeProject}>
+            <button className={`workspace-tools-trigger studio-toggle ${studioOpen ? "active" : ""}`} onClick={() => studioOpen ? setStudioOpen(false) : openStudio(studioTab)} title={activeProject ? "Open project workspace tools" : "Workspace tools are available inside projects"} aria-label={studioOpen ? "Close workspace tools" : "Open workspace tools"} aria-expanded={studioOpen} disabled={!activeProject}>
               <PanelRight size={17} />
+              <span>Workspace</span>
             </button>
           </div>
         </header>
@@ -1261,49 +1456,26 @@ export default function App() {
                     <span><Check size={13} /> {activeWorkspace.isChat ? "No project folder" : "Local project access"}</span>
                     <span><Check size={13} /> Approval controls</span>
                   </div>
+                  {!activeWorkspace.isChat && <div className="empty-state-actions" aria-label="Project workspace shortcuts"><button onClick={() => openStudio("files")}><FileCode2 size={14} /> Browse files</button><button onClick={() => openStudio("terminal")}><TerminalSquare size={14} /> Terminal</button><button onClick={() => openStudio("review")}><Search size={14} /> Review changes</button></div>}
                 </div>
               ) : (
-                <div className="timeline">
-                  {messages.map((message) => (
-                    <article key={message.id} className={`message ${message.role}`}>
-                      <div className="message-avatar">
-                        {message.role === "assistant" ? <Sparkles size={14} /> : <span>You</span>}
-                      </div>
-                      <div className="message-body">
-                        <div className="message-text">{message.text}</div>
-                        {message.streaming && <span className="stream-caret" />}
-                      </div>
-                    </article>
-                  ))}
-                  {activities.length > 0 && (
-                    <div className="activity-stack">
-                      {activities.map((activity) => (
-                        <div className="activity-row" key={activity.id}>
-                          <div className={`activity-icon ${activity.kind}`}>
-                            {activity.kind === "command" ? <TerminalSquare size={14} /> : activity.kind === "file" ? <FileCode2 size={14} /> : activity.kind === "agent" ? <UsersRound size={14} /> : <Sparkles size={14} />}
-                          </div>
-                          <div className="activity-copy">
-                            <span>{activity.title}</span>
-                            {activity.detail && <pre>{activity.detail.slice(-1200)}</pre>}
-                          </div>
-                          {activity.status && <small>{activity.status}</small>}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {running && !messages.some((message) => message.streaming) && (
-                    <div className="thinking-row"><LoaderCircle className="spin" size={15} /> {activeWorkspace.isChat ? "Thinking in normal chat" : `Working in ${activeProject?.name}`}</div>
-                  )}
-                </div>
+                <Suspense fallback={<div className="timeline-loading"><LoaderCircle className="spin" size={15} /> Loading conversation…</div>}>
+                  <ChatTimeline
+                    messages={messages}
+                    activities={activities}
+                    running={running}
+                    thinkingLabel={activeWorkspace.isChat ? "Thinking in normal chat" : `Working in ${activeProject?.name}`}
+                  />
+                </Suspense>
               )}
-              <div ref={endRef} />
             </section>
 
             <section className="composer-zone">
               {error && (
-                <div className="error-banner">
+                <div className="error-banner" role="alert">
                   <span>{error}</span>
-                  <button onClick={() => setError(null)}><X size={14} /></button>
+                  <button className="error-settings" onClick={() => setSettingsOpen(true)}>Check settings</button>
+                  <button onClick={() => setError(null)} aria-label="Dismiss error"><X size={14} /></button>
                 </div>
               )}
               <div className="composer">
@@ -1325,10 +1497,12 @@ export default function App() {
                     model={settings.model || "gpt-5.6-sol"}
                     effort={settings.reasoningEffort}
                     ultra={settings.ultra}
+                    fast={settings.serviceTier === "priority"}
                     runtimeModels={runtimeModels}
                     onModel={(model) => persistSettings({ ...settings, model })}
                     onEffort={(reasoningEffort) => persistSettings({ ...settings, reasoningEffort, ultra: false })}
                     onUltra={(ultra) => persistSettings({ ...settings, ultra, subagentsEnabled: ultra ? true : settings.subagentsEnabled })}
+                    onFast={(fast) => persistSettings({ ...settings, serviceTier: fast ? "priority" : null })}
                   />
                 )}
                 {settings.provider === "openrouter" && (
@@ -1391,8 +1565,13 @@ export default function App() {
                       {attachments.length ? attachments.length : "Attach"}
                     </button>
                   </div>
-                  <button className="send-button" onClick={() => void sendMessage()} disabled={!draft.trim() || running}>
-                    {running ? <LoaderCircle className="spin" size={17} /> : <ArrowUp size={18} />}
+                  {running && (
+                    <button className="stop-button" onClick={() => void stopTurn()} title="Stop the active task">
+                      <CircleStop size={17} />
+                    </button>
+                  )}
+                  <button className="send-button" onClick={() => void sendMessage()} disabled={!draft.trim()} title={running ? "Add direction to the active task" : "Send"}>
+                    {running ? <ArrowUp size={17} /> : <ArrowUp size={18} />}
                   </button>
                 </div>
               </div>
@@ -1402,10 +1581,11 @@ export default function App() {
         )}
       </main>
 
-      <StudioDock
+      <Suspense fallback={null}><StudioDock
         open={studioOpen && Boolean(activeProject)}
         tab={studioTab}
         projectName={activeProject?.name}
+        projectPath={activeProject?.path}
         activeThread={Boolean(activeThread)}
         diff={diff}
         approvedDiff={approvedDiff}
@@ -1424,12 +1604,14 @@ export default function App() {
         promptAudit={[
           { label: "Base instruction", value: settings.systemPrompt ? `custom · ${settings.systemPrompt.length} chars` : "empty" },
           { label: "Developer instruction", value: "empty" },
-          { label: "Project injection", value: "disabled" },
+          { label: "Project instructions", value: settings.projectInstructionsEnabled ? "enabled · AGENTS.md up to 32 KB" : "disabled" },
           { label: "Model", value: settings.model || "provider default" },
           { label: "Reasoning", value: settings.ultra ? "ultra" : settings.reasoningEffort },
           { label: "Sub-agents", value: settings.subagentsEnabled ? `on · max ${settings.subagentMax}` : "off" },
           { label: "Permissions", value: permissionLabel(settings.permission) },
+          { label: "Service tier", value: settings.serviceTier || "standard" },
         ]}
+        projectActions={projectActions}
         onTab={setStudioTab}
         onClose={() => setStudioOpen(false)}
         onRefreshDiff={() => void refreshDiff()}
@@ -1440,6 +1622,8 @@ export default function App() {
         onTerminalCommand={setTerminalCommand}
         onRunTerminal={() => void runTerminal()}
         onStopTerminal={() => void stopTerminal()}
+        onTerminalInput={writeTerminal}
+        onTerminalResize={resizeTerminal}
         onCheckpoint={createCheckpoint}
         onFork={(checkpoint) => void forkThread(checkpoint)}
         onRollback={() => void rollbackTurn()}
@@ -1450,7 +1634,12 @@ export default function App() {
         onRefreshTools={() => void refreshTools(activeProject)}
         onGitAction={(action) => void runGitAction(action)}
         onGitCommitMessage={setGitCommitMessage}
-      />
+        onGitPathAction={(action, path) => void runGitPathAction(action, path)}
+        onAttachPath={(path) => setAttachments((current) => current.some((item) => item.path === path) ? current : [...current, { path, name: basename(path), kind: "file" }])}
+        onProjectAction={(action) => void runProjectAction(action)}
+        onToggleSkill={(skill) => void toggleSkill(skill)}
+        onConnectMcp={(server) => void connectMcp(server)}
+      /></Suspense>
 
       <SettingsModal
         open={settingsOpen}
@@ -1466,8 +1655,19 @@ export default function App() {
         onAccountChange={async () => { await refreshAccount(); await refreshModels(); }}
         onSignIn={beginChatGptLogin}
         onRuntimeRequired={() => setRuntimeSetupOpen(true)}
+        onWorkspaceTools={() => { setSettingsOpen(false); openStudio("tools"); }}
         onOpenRouterChange={setOpenRouterReady}
         onError={setError}
+        profiles={promptProfiles}
+        agents={customAgents}
+        actions={projectActions}
+        schedules={scheduledTasks}
+        projects={projects}
+        workspaceToolsAvailable={Boolean(activeProject)}
+        onProfiles={(value) => { setPromptProfiles(value); storeValue("kiwi.promptProfiles", value); }}
+        onAgents={(value) => { setCustomAgents(value); storeValue("kiwi.customAgents", value); }}
+        onActions={(value) => { setProjectActions(value); storeValue("kiwi.projectActions", value); }}
+        onSchedules={(value) => { setScheduledTasks(value); storeValue("kiwi.scheduledTasks", value); }}
       />
 
       <RuntimeSetupModal
@@ -1485,8 +1685,20 @@ export default function App() {
       />
 
       {pendingApproval && (
-        <ApprovalModal approval={pendingApproval} onAnswer={answerApproval} />
+        <ApprovalCenter approval={pendingApproval} onRespond={(result) => void answerApproval(result)} />
       )}
+      <CommandPalette
+        open={commandPaletteOpen}
+        projects={projects}
+        threads={threads}
+        projectActive={Boolean(activeProject)}
+        onClose={() => setCommandPaletteOpen(false)}
+        onProject={(project) => { setActiveProjectId(project.id); setWorkspaceMode("project"); storeValue("kiwi.workspaceMode", "project"); }}
+        onThread={(thread) => void selectThread(thread)}
+        onNewThread={newThread}
+        onSettings={() => setSettingsOpen(true)}
+        onTool={openStudio}
+      />
     </div>
   );
 }
@@ -1578,8 +1790,19 @@ function SettingsModal({
   onAccountChange,
   onSignIn,
   onRuntimeRequired,
+  onWorkspaceTools,
   onOpenRouterChange,
   onError,
+  profiles,
+  agents,
+  actions,
+  schedules,
+  projects,
+  workspaceToolsAvailable,
+  onProfiles,
+  onAgents,
+  onActions,
+  onSchedules,
 }: {
   open: boolean;
   settings: AppSettings;
@@ -1591,12 +1814,24 @@ function SettingsModal({
   onAccountChange: () => Promise<void>;
   onSignIn: () => Promise<void>;
   onRuntimeRequired: () => void;
+  onWorkspaceTools: () => void;
   onOpenRouterChange: (ready: boolean) => void;
   onError: (error: string | null) => void;
+  profiles: PromptProfile[];
+  agents: CustomAgentProfile[];
+  actions: ProjectAction[];
+  schedules: ScheduledTask[];
+  projects: Project[];
+  workspaceToolsAvailable: boolean;
+  onProfiles: (value: PromptProfile[]) => void;
+  onAgents: (value: CustomAgentProfile[]) => void;
+  onActions: (value: ProjectAction[]) => void;
+  onSchedules: (value: ScheduledTask[]) => void;
 }) {
   const [local, setLocal] = useState(settings);
   const [apiKey, setApiKey] = useState("");
   const [busy, setBusy] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<"general" | "models" | "prompts" | "agents" | "workflows" | "tools">("general");
 
   useEffect(() => {
     if (open) setLocal(settings);
@@ -1621,7 +1856,7 @@ function SettingsModal({
     try {
       await onSignIn();
     } catch (reason) {
-      onError(String(reason));
+      onError(friendlyError(reason));
     } finally {
       setBusy(false);
     }
@@ -1633,7 +1868,7 @@ function SettingsModal({
       await rpc("account/logout");
       await onAccountChange();
     } catch (reason) {
-      onError(String(reason));
+      onError(friendlyError(reason));
     } finally {
       setBusy(false);
     }
@@ -1647,21 +1882,41 @@ function SettingsModal({
       setApiKey("");
       onOpenRouterChange(true);
     } catch (reason) {
-      onError(String(reason));
+      onError(friendlyError(reason));
     } finally {
       setBusy(false);
     }
   };
 
+  const exportDiagnosticBundle = async () => {
+    try {
+      const path = await save({ title: "Export OpenKiwi diagnostics", defaultPath: `openkiwi-diagnostics-${new Date().toISOString().slice(0, 10)}.json`, filters: [{ name: "JSON", extensions: ["json"] }] });
+      if (path) await exportDiagnostics(path);
+    } catch (reason) { onError(friendlyError(reason)); }
+  };
+
   return (
     <div className={`modal-backdrop settings-backdrop ${open ? "open" : "closed"}`} onMouseDown={onClose} aria-hidden={!open} inert={!open ? true : undefined}>
-      <div className="settings-modal" onMouseDown={(event) => event.stopPropagation()}>
+      <div className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
         <div className="modal-header">
-          <div><h2>Settings</h2><p>OpenKiwi’s instruction text is visible and user-controlled.</p></div>
-          <button className="icon-button" onClick={onClose}><X size={18} /></button>
+          <div><h2 id="settings-title">Settings</h2><p>Customize OpenKiwi without hidden configuration.</p></div>
+          <button className="icon-button" onClick={onClose} aria-label="Close settings"><X size={18} /></button>
         </div>
 
-        <div className="settings-content">
+        <div className="settings-layout">
+          <nav className="settings-nav" aria-label="Settings categories">
+            {([
+              ["general", "General", Palette],
+              ["models", "Models & accounts", KeyRound],
+              ["prompts", "Prompts", Sparkles],
+              ["agents", "Agents", UsersRound],
+              ["workflows", "Workflows", Play],
+              ["tools", "Tools & MCP", Wrench],
+            ] as const).map(([id, label, Icon]) => <button key={id} className={settingsSection === id ? "active" : ""} onClick={() => setSettingsSection(id)} aria-current={settingsSection === id ? "page" : undefined}><Icon size={14} /><span>{label}</span><ChevronRight size={12} /></button>)}
+          </nav>
+          <div className="settings-content">
+          <div className="settings-pane-heading"><span>{settingsSection === "general" ? "General" : settingsSection === "models" ? "Models & accounts" : settingsSection === "prompts" ? "Prompts" : settingsSection === "agents" ? "Agents" : settingsSection === "workflows" ? "Workflows" : "Tools & MCP"}</span><small>{settingsSection === "general" ? "Appearance, runtime behavior, and diagnostics" : settingsSection === "models" ? "Providers, credentials, and model routing" : settingsSection === "prompts" ? "Your complete harness instruction and reusable profiles" : settingsSection === "agents" ? "Delegation limits and specialist configurations" : settingsSection === "workflows" ? "Reusable project actions and scheduled tasks" : "Skills and Model Context Protocol servers"}</small></div>
+          {settingsSection === "general" &&
           <section className="settings-section theme-settings-section">
             <div className="settings-section-heading settings-heading-with-action">
               <div className="settings-icon"><Palette size={17} /></div>
@@ -1688,8 +1943,9 @@ function SettingsModal({
                 </button>
               ))}
             </div>
-          </section>
+          </section>}
 
+          {settingsSection === "prompts" &&
           <section className="settings-section">
             <div className="settings-section-heading">
               <div className="settings-icon"><Sparkles size={17} /></div>
@@ -1705,10 +1961,39 @@ function SettingsModal({
             <div className="prompt-audit-row">
               <span><Check size={13} /> Base prompt visible</span>
               <span><Check size={13} /> Developer prompt empty</span>
-              <span><Check size={13} /> Project instruction injection disabled</span>
+              <span><Check size={13} /> Project instructions {local.projectInstructionsEnabled ? "enabled" : "disabled"}</span>
             </div>
-          </section>
+          </section>}
 
+          {(["prompts", "agents", "workflows", "tools"] as const).includes(settingsSection as "prompts" | "agents" | "workflows" | "tools") && <HarnessSettings
+            section={settingsSection as "prompts" | "agents" | "workflows" | "tools"}
+            settings={local}
+            profiles={profiles}
+            agents={agents}
+            actions={actions}
+            schedules={schedules}
+            projects={projects}
+            onSettings={setLocal}
+            onProfiles={onProfiles}
+            onAgents={onAgents}
+            onActions={onActions}
+            onSchedules={onSchedules}
+          />}
+
+          {settingsSection === "tools" && <div className="settings-workspace-link"><div><strong>Live tool controls</strong><small>{workspaceToolsAvailable ? "Inspect skills, connect configured MCP servers, and run project actions in the active workspace." : "Select a project to inspect live skills, MCP servers, and project actions."}</small></div><button className="secondary-button" onClick={onWorkspaceTools} disabled={!workspaceToolsAvailable}><PanelRight size={13} /> Open workspace tools</button></div>}
+
+          {settingsSection === "general" &&
+          <section className="settings-section">
+            <div className="settings-section-heading"><div className="settings-icon"><Wrench size={17} /></div><div><h3>Runtime behavior</h3><p>Control project guidance, background alerts, service tier, and terminal memory.</p></div></div>
+            <div className="behavior-grid">
+              <div><span><strong>Project instructions</strong><small>Allow AGENTS.md discovery for project threads (up to 32 KB).</small></span><button type="button" role="switch" aria-checked={local.projectInstructionsEnabled} className={`toggle-switch ${local.projectInstructionsEnabled ? "on" : ""}`} onClick={() => setLocal({ ...local, projectInstructionsEnabled: !local.projectInstructionsEnabled })}><span /></button></div>
+              <div><span><strong>Desktop notifications</strong><small>Notify when a background task finishes.</small></span><button type="button" role="switch" aria-checked={local.notificationsEnabled} className={`toggle-switch ${local.notificationsEnabled ? "on" : ""}`} onClick={() => setLocal({ ...local, notificationsEnabled: !local.notificationsEnabled })}><span /></button></div>
+            </div>
+            <div className="runtime-field-grid"><label><span>OpenAI service tier</span><select value={local.serviceTier ?? ""} onChange={(event) => setLocal({ ...local, serviceTier: event.target.value || null })}><option value="">Standard</option><option value="priority">Fast / priority</option></select></label><label><span>Terminal scrollback</span><select value={local.terminalScrollback} onChange={(event) => setLocal({ ...local, terminalScrollback: Number(event.target.value) })}><option value={25000}>25k characters</option><option value={100000}>100k characters</option><option value={500000}>500k characters</option></select></label></div>
+            <div className="diagnostic-card"><span><strong>Diagnostics</strong><small>{runtimeStatus?.version ?? "Runtime version unavailable"}{runtimeStatus?.warning ? ` · ${runtimeStatus.warning}` : runtimeStatus?.compatible ? " · compatible" : ""}</small></span><button className="secondary-button" onClick={() => void exportDiagnosticBundle()}>Export JSON</button></div>
+          </section>}
+
+          {settingsSection === "agents" &&
           <section className="settings-section">
             <div className="settings-section-heading">
               <div className="settings-icon"><UsersRound size={17} /></div>
@@ -1742,8 +2027,9 @@ function SettingsModal({
               <span><Check size={13} /> Direct children only</span>
               <span><Check size={13} /> Off by default</span>
             </div>
-          </section>
+          </section>}
 
+          {settingsSection === "models" &&
           <section className="settings-section">
             <div className="settings-section-heading">
               <div className="settings-icon"><KeyRound size={17} /></div>
@@ -1799,40 +2085,13 @@ function SettingsModal({
               />
               <small>{local.provider === "openrouter" ? "Use the searchable picker beneath the composer, or enter any valid provider/model slug here." : "Use the animated selector beneath the composer. Availability follows the signed-in ChatGPT account."}</small>
             </label>
-          </section>
+          </section>}
+          </div>
         </div>
 
         <div className="modal-footer">
           <button className="secondary-button" onClick={onClose}>Cancel</button>
           <button className="primary-button" onClick={() => onSave({ ...local, subagentMax: Math.min(24, Math.max(1, local.subagentMax)) })}>Save settings</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ApprovalModal({
-  approval,
-  onAnswer,
-}: {
-  approval: PendingApproval;
-  onAnswer: (decision: "accept" | "acceptForSession" | "decline") => Promise<void>;
-}) {
-  const isFile = approval.method.includes("fileChange");
-  const command = String(approval.params.command ?? "");
-  const reason = String(approval.params.reason ?? "The agent is requesting permission to continue.");
-
-  return (
-    <div className="modal-backdrop approval-backdrop">
-      <div className="approval-modal">
-        <div className="approval-shield"><ShieldAlert size={22} /></div>
-        <h2>{isFile ? "Allow file changes?" : "Allow this action?"}</h2>
-        <p>{reason}</p>
-        {command && <pre className="approval-command">{command}</pre>}
-        <div className="approval-actions">
-          <button className="secondary-button danger" onClick={() => void onAnswer("decline")}>Deny</button>
-          <button className="secondary-button" onClick={() => void onAnswer("acceptForSession")}>Allow for session</button>
-          <button className="primary-button" onClick={() => void onAnswer("accept")}>Allow once</button>
         </div>
       </div>
     </div>

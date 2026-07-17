@@ -38,23 +38,28 @@ export function ModelPowerControl({
   model,
   effort,
   ultra,
+  fast,
   runtimeModels,
   disabled,
   onModel,
   onEffort,
   onUltra,
+  onFast,
 }: {
   model: string;
   effort: ReasoningEffort;
   ultra: boolean;
+  fast: boolean;
   runtimeModels: RuntimeModel[];
   disabled?: boolean;
   onModel: (model: string) => void;
   onEffort: (effort: ReasoningEffort) => void;
   onUltra: (enabled: boolean) => void;
+  onFast: (enabled: boolean) => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const kind = modelKind(model);
   const selectedModel = MODELS.find((entry) => entry.kind === kind) ?? MODELS[0];
   const selectedRuntime = runtimeModels.find((entry) => entry.model === model || entry.id === model);
@@ -79,6 +84,19 @@ export function ModelPowerControl({
     };
   }, []);
 
+  useEffect(() => {
+    if (!menuOpen) return;
+    const selectedIndex = Math.max(0, MODELS.findIndex((entry) => entry.kind === kind));
+    requestAnimationFrame(() => optionRefs.current[selectedIndex]?.focus());
+  }, [kind, menuOpen]);
+
+  const moveOptionFocus = (direction: number) => {
+    const enabled = optionRefs.current.filter((entry): entry is HTMLButtonElement => Boolean(entry && !entry.disabled));
+    if (!enabled.length) return;
+    const current = enabled.indexOf(document.activeElement as HTMLButtonElement);
+    enabled[(current + direction + enabled.length) % enabled.length]?.focus();
+  };
+
   return (
     <div
       ref={rootRef}
@@ -91,10 +109,17 @@ export function ModelPowerControl({
         <button
           type="button"
           className="model-picker-trigger"
-          aria-haspopup="listbox"
+          aria-haspopup="menu"
           aria-expanded={menuOpen}
+          aria-label={`OpenAI model: ${selectedModel.name}`}
           disabled={disabled}
           onClick={() => setMenuOpen((open) => !open)}
+          onKeyDown={(event) => {
+            if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+              event.preventDefault();
+              setMenuOpen(true);
+            }
+          }}
         >
           <span className="model-orb"><SelectedModelIcon size={13} strokeWidth={2.2} /></span>
           <span className="model-picker-copy">
@@ -105,7 +130,13 @@ export function ModelPowerControl({
           <ChevronDown className="model-picker-chevron" size={15} />
         </button>
 
-        <div className="model-menu" role="listbox" aria-label="OpenAI model selector">
+        <div className="model-menu" role="menu" aria-label="OpenAI model selector" onKeyDown={(event) => {
+          if (event.key === "ArrowDown") { event.preventDefault(); moveOptionFocus(1); }
+          if (event.key === "ArrowUp") { event.preventDefault(); moveOptionFocus(-1); }
+          if (event.key === "Home") { event.preventDefault(); optionRefs.current.find((entry) => entry && !entry.disabled)?.focus(); }
+          if (event.key === "End") { event.preventDefault(); [...optionRefs.current].reverse().find((entry) => entry && !entry.disabled)?.focus(); }
+          if (event.key === "Escape") { event.preventDefault(); setMenuOpen(false); rootRef.current?.querySelector<HTMLButtonElement>(".model-picker-trigger")?.focus(); }
+        }}>
           <div className="model-menu-heading"><span>Choose your model</span><small>OpenAI subscription</small></div>
           {MODELS.map((entry) => {
             const available = runtimeModels.length === 0 || runtimeModels.some((candidate) => candidate.model === entry.id || candidate.id === entry.id);
@@ -114,9 +145,11 @@ export function ModelPowerControl({
             return (
               <button
                 type="button"
-                role="option"
-                aria-selected={selected}
+                role="menuitemradio"
+                aria-checked={selected}
+                aria-label={`${entry.name}: ${entry.tagline}${available ? "" : " (unavailable)"}`}
                 key={entry.kind}
+                ref={(node) => { optionRefs.current[MODELS.indexOf(entry)] = node; }}
                 className={`model-menu-option ${entry.kind} ${selected ? "selected" : ""}`}
                 disabled={disabled || !available}
                 onClick={() => {
@@ -135,7 +168,7 @@ export function ModelPowerControl({
       </div>
 
       <div className="reasoning-control">
-        <div className="reasoning-heading"><Gauge size={13} /><span>Reasoning</span><strong>{ultra ? "Ultra" : EFFORTS[effortIndex].label}</strong></div>
+        <div className="reasoning-heading"><Gauge size={13} /><span>Reasoning</span><button type="button" className={`fast-tier ${fast ? "on" : ""}`} aria-pressed={fast} aria-label="Use OpenAI fast priority service tier" onClick={() => onFast(!fast)} title="Use OpenAI priority service tier"><Zap size={9} /> Fast</button><strong>{ultra ? "Ultra" : EFFORTS[effortIndex].label}</strong></div>
         <div className="reasoning-rail">
           <input
             aria-label="Reasoning effort"
@@ -160,6 +193,7 @@ export function ModelPowerControl({
         type="button"
         role="switch"
         aria-checked={ultra}
+        aria-label="Ultra reasoning"
         className={`ultra-lever ${ultra ? "engaged" : ""}`}
         disabled={disabled || !ultraAvailable}
         onClick={() => onUltra(!ultra)}

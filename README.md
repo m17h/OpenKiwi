@@ -2,7 +2,7 @@
 
 OpenKiwi is a fast, local-first desktop coding harness with a user-owned instruction prompt. It supports OpenAI through an official ChatGPT subscription sign-in flow and OpenRouter through a user-supplied API key.
 
-This repository contains a runnable desktop coding environment: normal chats, folder-bound project threads, streamed agent events, three permission modes, provider setup, approval dialogs, an explicit empty-by-default instruction prompt, opt-in harness-level sub-agents, animated model controls, and an integrated workspace studio.
+This repository contains a runnable desktop coding environment: normal chats, folder-bound project threads, concurrent background tasks, steering and interruption, three permission modes, typed approvals and user-input requests, an explicit empty-by-default instruction prompt, opt-in harness-level sub-agents, prompt/agent profiles, scheduled tasks, animated model controls, and an integrated workspace studio.
 
 ## Why this architecture
 
@@ -54,8 +54,8 @@ For each new thread, OpenKiwi:
 
 1. Sends the visible Settings prompt as App Server's explicit `baseInstructions` override. The default is the empty string.
 2. Sends an empty app developer-instruction override.
-3. Runs App Server with a private config that disables `AGENTS.md`/project-document instruction loading.
-4. Renders model output as escaped text rather than executable HTML.
+3. Disables `AGENTS.md`/project-document instruction loading by default. Users can explicitly enable it in Settings; the request audit shows its state.
+4. Renders Markdown through a safe React renderer with no raw-HTML plugin. Code blocks are copyable but never executable by the renderer.
 
 This means **OpenKiwi adds no secret instruction text**. It does not mean the entire inference stack is literally prompt-free: model providers can enforce platform policies, and a coding engine must still provide tool schemas and runtime metadata. A future wire-audit view should make those non-instruction request fields inspectable too.
 
@@ -108,16 +108,17 @@ Model and effort are sent as real thread/turn overrides. They are not presentati
 
 ## Workspace Studio
 
-The right-side Studio contains eight integrated surfaces:
+The right-side Studio contains nine integrated surfaces:
 
-1. **Review** — live turn/Git diff, per-hunk review marks, whole-diff approval state, and an App Server review turn.
-2. **Agents** — observed child threads, current status, child-thread inspection, and interruption.
-3. **Terminal** — streamed project shell output with cancellation and the selected permission sandbox.
-4. **History** — local checkpoints, App Server thread forks, conversation rollback, and real Git worktree creation.
-5. **Context** — file mentions and native local-image inputs attached to the next turn.
-6. **Usage** — token/context telemetry, account rate limits, and a visible request-field audit.
-7. **Tools** — isolated-runtime skill inventory, MCP status/tool counts, and permission-boundary guidance.
-8. **Git** — status, diff, stage, tracked-file revert confirmation, commits, PR comments, CI checks, and draft PR creation.
+1. **Files** — fuzzy project search, text previews, and one-click context attachment.
+2. **Review** — live turn/Git diff, per-hunk review marks, whole-diff approval state, and an App Server review turn.
+3. **Agents** — observed child threads, current status, child-thread inspection, and interruption.
+4. **Terminal** — a PTY-backed xterm surface with streamed bytes, stdin, resize, cancellation, and the selected permission sandbox.
+5. **History** — local checkpoints, App Server thread forks, conversation rollback, and real Git worktree creation.
+6. **Context** — file mentions and native local-image inputs attached to the next turn.
+7. **Usage** — token/context telemetry, account rate limits, and a visible request-field audit.
+8. **Tools** — project actions, skill enable/disable, MCP status/OAuth, and permission-boundary guidance.
+9. **Git** — status, diff, file-level stage/revert, stage all, tracked-file revert confirmation, commits, PR comments, CI checks, and draft PR creation.
 
 The review approval and checkpoint records are UI review state. Conversation rollback intentionally does not claim to revert filesystem changes; file rollback remains an explicit Git action.
 
@@ -129,16 +130,23 @@ The review approval and checkpoint records are UI review state. Conversation rol
 - ChatGPT credentials use Codex's isolated credential store.
 - Model content is not rendered as HTML.
 - App Server uses stdio and is never exposed as a network listener.
+- Projects, settings, profiles, schedules, and bindings are mirrored to native SQLite in WAL mode. Existing localStorage data is migrated on first launch.
+- Approval and lifecycle audit records intentionally omit user-input answers so secret form fields are not persisted.
+- App Server requests have bounded, method-aware timeouts; a dead child is detected, restarted, and the interrupted RPC is retried once.
 
-## Current scope and next milestones
+## Performance and task control
 
-The foundation is intentionally local-first and conservative. Before calling it a production release, the next milestones are:
+- Each thread owns independent messages, activities, approvals, child agents, diff, usage, unread state, and lifecycle status.
+- Streaming deltas are batched once per animation frame and routed by `threadId`, so background tasks cannot overwrite the active task.
+- Long transcripts are virtualized and Markdown/terminal code is split into lazy chunks to keep startup and scrolling responsive.
+- While a turn is running, Send steers it with `turn/steer`; Stop interrupts it without disturbing other threads.
+- Completed background work can raise a native notification. The sidebar shows running and unread state.
+- `⌘K` opens a command palette across commands, projects, and current-scope threads.
+- Scheduled project prompts run while OpenKiwi is open and create normal, inspectable App Server threads.
 
-1. Add a compatibility check and guided updater for supported external Codex runtime versions.
-2. Add protocol fixtures and end-to-end tests for login, thread resume, approvals, cancellation, and both providers.
-3. Add protocol-level fixtures for every Studio action and adversarial tests for terminal/Git inputs.
-4. Add durable native audit storage, richer per-line diff comments, and project-wide thread search.
-5. Add code signing, auto-update, crash recovery, and cross-platform packaging.
+## Verification and release notes
+
+`npm run verify` runs TypeScript, Rust, unit/integration component tests, and the production web build. `npm run desktop:build` produces the platform installer/application. Distribution outside local testing still requires platform signing/notarization credentials owned by the publisher; OpenKiwi does not embed those credentials or bundle Codex.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the component and state model.
 

@@ -1,0 +1,133 @@
+import type { ReasoningEffort } from "./components/ModelPowerControl";
+import type { JsonObject } from "./lib/codex";
+
+export type Provider = "openai" | "openrouter";
+export type PermissionMode = "read-only" | "ask" | "full";
+export type ThemeName = "kiwi" | "midnight" | "ember" | "violet";
+export type WorkspaceMode = "chat" | "project";
+
+export interface Project {
+  id: string;
+  name: string;
+  path: string;
+  pinned?: boolean;
+  isChat?: boolean;
+}
+
+export interface Thread {
+  id: string;
+  name: string | null;
+  preview: string;
+  cwd: string;
+  updatedAt: number;
+  modelProvider: string;
+  turns?: Turn[];
+}
+
+export interface Turn {
+  id: string;
+  items: ThreadItem[];
+}
+
+export interface ThreadItem {
+  id?: string;
+  type: string;
+  text?: string;
+  content?: Array<{ type: string; text?: string }>;
+  command?: string;
+  cwd?: string;
+  status?: string;
+  aggregatedOutput?: string | null;
+  exitCode?: number | null;
+  changes?: unknown[];
+  summary?: string[];
+  tool?: "spawnAgent" | "sendInput" | "resumeAgent" | "wait" | "closeAgent";
+  prompt?: string | null;
+  receiverThreadIds?: string[];
+  agentThreadId?: string;
+  agentPath?: string;
+  kind?: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  streaming?: boolean;
+}
+
+export interface Activity {
+  id: string;
+  kind: "command" | "file" | "reasoning" | "agent" | "warning";
+  title: string;
+  detail?: string;
+  status?: string;
+}
+
+export interface Account {
+  type?: string;
+  email?: string | null;
+  planType?: string | null;
+}
+
+export interface PendingApproval {
+  id: number | string;
+  method: string;
+  params: JsonObject;
+  threadId: string;
+  receivedAt: number;
+}
+
+export interface PromptProfile {
+  id: string;
+  name: string;
+  prompt: string;
+  builtIn?: boolean;
+}
+
+export interface CustomAgentProfile {
+  id: string;
+  name: string;
+  description: string;
+  instructions: string;
+  model?: string;
+  reasoningEffort?: ReasoningEffort;
+  permission?: PermissionMode;
+  enabled: boolean;
+}
+
+export interface ProjectAction {
+  id: string;
+  name: string;
+  command: string;
+  icon?: string;
+}
+
+export interface ScheduledTask {
+  id: string;
+  name: string;
+  prompt: string;
+  projectId: string | null;
+  intervalMinutes: number;
+  enabled: boolean;
+  nextRunAt: number;
+  lastRunAt?: number;
+  lastThreadId?: string;
+}
+
+export interface AppSettings {
+  provider: Provider;
+  model: string;
+  permission: PermissionMode;
+  systemPrompt: string;
+  promptProfileId: string;
+  projectInstructionsEnabled: boolean;
+  subagentsEnabled: boolean;
+  subagentMax: number;
+  reasoningEffort: ReasoningEffort;
+  ultra: boolean;
+  serviceTier: string | null;
+  theme: ThemeName;
+  notificationsEnabled: boolean;
+  terminalScrollback: number;
+}

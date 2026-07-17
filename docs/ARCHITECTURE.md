@@ -4,8 +4,9 @@
 
 ```text
 React webview
-  ├─ projects + UI preferences (localStorage)
-  ├─ chat/event rendering
+  ├─ projects + UI preferences (SQLite-backed cache)
+  ├─ thread-scoped Zustand task state
+  ├─ virtualized Markdown/event rendering
   ├─ animated model/reasoning power rail
   └─ Studio: review, agents, terminal, history, context, usage, tools, and Git
           │ Tauri IPC (allowlisted commands)
@@ -13,8 +14,9 @@ React webview
 Rust desktop host
   ├─ OS credential store (OpenRouter key)
   ├─ isolated OpenKiwi app-data/Codex home
-  ├─ JSON-RPC request correlation
-  └─ child-process lifecycle
+  ├─ SQLite/WAL state + audit history
+  ├─ JSON-RPC request correlation + timeouts
+  └─ health-checked child-process recovery
           │ JSONL over stdio
           ▼
 Codex App Server
@@ -32,19 +34,20 @@ The control plane and execution plane remain separate. The React view never laun
 
 | State | Owner | Location |
 | --- | --- | --- |
-| Project list | UI | Webview local storage |
-| UI settings and visible prompt | UI | Webview local storage |
+| Project list | UI/native host | SQLite, with localStorage as immediate cache |
+| UI settings, profiles, actions, schedules, and visible prompt | UI/native host | SQLite, with localStorage as immediate cache |
 | OpenRouter API key | Native host | OS credential store |
 | OpenRouter model catalog | Native host | Live tool-capable `/api/v1/models` response |
 | ChatGPT login | App Server | OpenKiwi-specific `CODEX_HOME` credential storage |
 | Threads and rollout history | App Server | OpenKiwi-specific `CODEX_HOME` |
 | Active JSON-RPC requests | Native host | Memory only |
-| Active approvals | UI + App Server | Memory only until answered |
-| Checkpoint labels and review marks | UI | Webview local storage / memory |
+| Active approvals | Thread task store + App Server | Per-thread queue until answered |
+| Checkpoint labels and thread bindings | UI/native host | SQLite-backed cache |
+| Approval/lifecycle audit | Native host | SQLite; secret answers excluded |
 | Terminal processes | App Server | Connection-scoped memory |
 | Model catalog, usage, MCP and skill inventory | App Server | Refreshed runtime state |
 
-OpenKiwi's private Codex home is under the platform Tauri app-data directory. The native host writes a controlled `config.toml` there on startup. Provider configuration cannot be overridden by project files.
+OpenKiwi's private Codex home is under the platform Tauri app-data directory. The native host creates a controlled `config.toml` on first startup and preserves subsequent user-managed skills/MCP configuration. Provider and thread overrides remain explicit.
 
 ## Thread creation contract
 
@@ -56,7 +59,7 @@ A new thread is created with:
 - the selected sandbox and approval policy;
 - `baseInstructions` equal to the Settings prompt, including an explicit empty string;
 - an empty `developerInstructions` value;
-- project instruction loading disabled.
+- project instruction loading disabled by default, or explicitly enabled by the user;
 - sub-agent tools explicitly enabled or disabled, with a user-selected child cap and depth fixed at one.
 
 These fields are set only when a thread is created. Existing threads retain their original prompt and provider context when resumed, which avoids silently rewriting conversation behavior.
@@ -79,11 +82,12 @@ The webview renders collaboration tool calls and child activity as structured ti
 | --- | --- |
 | Review | `turn/diff/updated`, `gitDiffToRemote`, `review/start` |
 | Agents | collaboration thread items, `thread/read`, `turn/interrupt` |
-| Terminal | `command/exec`, streamed base64 output notifications, `command/exec/terminate` |
+| Files | `fuzzyFileSearch`, `fs/readDirectory`, `fs/readFile` |
+| Terminal | PTY `command/exec`, streamed base64 output, `command/exec/write`, `command/exec/resize`, `command/exec/terminate` |
 | History | `thread/fork`, `thread/rollback`; Git worktrees through sandboxed command execution |
 | Context | `localImage` and explicit file mention inputs on `turn/start` |
 | Usage | `thread/tokenUsage/updated`, `account/rateLimits/read` |
-| Tools | `skills/list`, `mcpServerStatus/list` |
+| Tools | `skills/list`, `skills/config/write`, MCP status/OAuth/reload, project actions |
 | Git | typed `git`/`gh` argv through `command/exec`; destructive tracked-file restore requires UI confirmation |
 
 Standalone terminal and Git commands receive an explicit sandbox policy derived from the same Read only / Ask to act / Full access setting used by agent threads.
@@ -116,7 +120,7 @@ The Rust host assigns numeric request IDs and stores one-shot response channels 
 - stderr is emitted only as diagnostic status text;
 - connection loss fails all pending requests.
 
-The webview handles streamed assistant deltas, completed items, command/file/sub-agent activities, live diffs, terminal bytes, token usage, account updates, turn lifecycle, and command/file approval requests.
+The webview handles streamed assistant deltas, completed items, command/file/sub-agent activities, live diffs, terminal bytes, token usage, account updates, turn lifecycle, command/file/permission approvals, structured agent questions, and MCP elicitation forms. Current-time requests are answered automatically. Every event is routed by thread ID.
 
 ## Deliberate constraints
 
@@ -126,11 +130,9 @@ The webview handles streamed assistant deltas, completed items, command/file/sub
 - No automatic import of global Codex config, auth, skills, or project instructions.
 - No silent provider fallback between OpenAI and OpenRouter.
 
-## Planned hardening
+## Runtime and release posture
 
-- Bundle and hash a known App Server binary.
-- Validate App Server version/protocol compatibility at startup.
-- Move project and UI state to a native SQLite store with migrations.
-- Add structured audit records for approvals and tool calls.
-- Add a request-inspection mode backed by a test proxy or instrumented runtime.
-- Add automated adversarial tests for malicious repository content and model output.
+- OpenKiwi intentionally does not bundle Codex. It detects a CLI installation or the runtime inside ChatGPT for macOS, reports its version, and warns below the tested 0.145 App Server contract.
+- A closed/broken App Server fails pending calls, is respawned, reinitialized, and retries the affected RPC once.
+- Web assets are code-split so xterm and Markdown parsing do not block the initial shell.
+- Platform signing, notarization, updater keys, and store distribution are publisher responsibilities and are not committed to this repository.
