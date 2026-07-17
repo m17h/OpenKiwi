@@ -1,0 +1,145 @@
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { Check, ChevronDown, Gauge, LoaderCircle, RefreshCw, Route, Search } from "lucide-react";
+import type { ReasoningEffort } from "./ModelPowerControl";
+
+export interface OpenRouterModel {
+  id: string;
+  name: string;
+  description?: string;
+  context_length?: number;
+  supported_parameters?: string[];
+  pricing?: { prompt?: string; completion?: string };
+}
+
+const EFFORTS: Array<{ value: Exclude<ReasoningEffort, "ultra">; label: string; shortLabel: string }> = [
+  { value: "low", label: "Light", shortLabel: "Light" },
+  { value: "medium", label: "Medium", shortLabel: "Medium" },
+  { value: "high", label: "High", shortLabel: "High" },
+  { value: "xhigh", label: "Extra high", shortLabel: "Extra" },
+  { value: "max", label: "Maximum", shortLabel: "Max" },
+];
+
+function compactContext(value?: number): string {
+  if (!value) return "";
+  if (value >= 1_000_000) return `${Math.round(value / 100_000) / 10}M ctx`;
+  return `${Math.round(value / 1000)}K ctx`;
+}
+
+function providerName(id: string): string {
+  const provider = id.split("/")[0] || "OpenRouter";
+  return provider.replace(/(^|-)([a-z])/g, (_, separator: string, letter: string) => `${separator}${letter.toUpperCase()}`);
+}
+
+export function OpenRouterModelControl({
+  model,
+  effort,
+  models,
+  loading,
+  error,
+  onModel,
+  onEffort,
+  onRefresh,
+}: {
+  model: string;
+  effort: ReasoningEffort;
+  models: OpenRouterModel[];
+  loading: boolean;
+  error: string;
+  onModel: (model: string) => void;
+  onEffort: (effort: ReasoningEffort) => void;
+  onRefresh: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const rootRef = useRef<HTMLDivElement>(null);
+  const normalizedEffort = effort === "ultra" ? "max" : effort;
+  const effortIndex = Math.max(0, EFFORTS.findIndex((entry) => entry.value === normalizedEffort));
+  const fill = (effortIndex / (EFFORTS.length - 1)) * 100;
+  const selected = models.find((entry) => entry.id === model);
+  const query = search.trim().toLowerCase();
+  const filtered = useMemo(() => {
+    if (!query) return models.slice(0, 80);
+    return models
+      .filter((entry) => `${entry.name} ${entry.id} ${entry.description ?? ""}`.toLowerCase().includes(query))
+      .slice(0, 80);
+  }, [models, query]);
+  const canUseCustom = search.trim().includes("/") && !models.some((entry) => entry.id.toLowerCase() === query);
+
+  useEffect(() => {
+    function handlePointerDown(event: PointerEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, []);
+
+  return (
+    <div className="openrouter-control" ref={rootRef} style={{ "--router-fill": `${fill}%` } as CSSProperties}>
+      <div className={`openrouter-picker ${open ? "open" : ""}`}>
+        <button type="button" className="openrouter-trigger" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+          <span className="openrouter-logo"><Route size={14} /></span>
+          <span className="openrouter-trigger-copy">
+            <small>OpenRouter model</small>
+            <strong>{selected?.name || model || "Choose a model"}</strong>
+            <em>{model ? `${providerName(model)}${selected?.context_length ? ` · ${compactContext(selected.context_length)}` : ""}` : `${models.length || "Live"} tool-capable models`}</em>
+          </span>
+          <ChevronDown size={15} />
+        </button>
+
+        <div className="openrouter-menu">
+          <div className="openrouter-search-row">
+            <Search size={14} />
+            <input autoFocus={open} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search models or enter provider/model…" />
+            <button type="button" onClick={onRefresh} title="Refresh catalog" disabled={loading}>{loading ? <LoaderCircle className="spin" size={13} /> : <RefreshCw size={13} />}</button>
+          </div>
+          <div className="openrouter-menu-meta"><span>{query ? `${filtered.length} matches` : `${models.length} available`}</span><small>Tool-capable catalog</small></div>
+          <div className="openrouter-options" role="listbox" aria-label="OpenRouter model selector">
+            {filtered.map((entry) => (
+              <button
+                type="button"
+                role="option"
+                aria-selected={entry.id === model}
+                className={entry.id === model ? "selected" : ""}
+                key={entry.id}
+                onClick={() => {
+                  onModel(entry.id);
+                  setSearch("");
+                  setOpen(false);
+                }}
+              >
+                <span className="openrouter-provider-mark">{providerName(entry.id).slice(0, 2).toUpperCase()}</span>
+                <span><strong>{entry.name || entry.id}</strong><small>{entry.id}</small></span>
+                <span className="openrouter-model-meta">{compactContext(entry.context_length)}{entry.supported_parameters?.includes("reasoning") ? " · reasoning" : ""}</span>
+                {entry.id === model && <Check size={13} />}
+              </button>
+            ))}
+            {canUseCustom && (
+              <button type="button" className="custom-model-option" onClick={() => { onModel(search.trim()); setSearch(""); setOpen(false); }}>
+                <span className="openrouter-provider-mark">+</span>
+                <span><strong>Use custom model slug</strong><small>{search.trim()}</small></span>
+              </button>
+            )}
+            {!loading && !filtered.length && !canUseCustom && <div className="openrouter-empty"><strong>No matching models</strong><span>{error || "Enter a complete provider/model slug to use it directly."}</span></div>}
+          </div>
+          {error && <div className="openrouter-catalog-warning">{error} · Custom slugs still work.</div>}
+        </div>
+      </div>
+
+      <div className="openrouter-reasoning">
+        <div className="openrouter-reasoning-heading"><Gauge size={13} /><span>Reasoning</span><strong>{EFFORTS[effortIndex].label}</strong></div>
+        <div className="openrouter-reasoning-rail">
+          <input aria-label="OpenRouter reasoning effort" type="range" min={0} max={EFFORTS.length - 1} step={1} value={effortIndex} onChange={(event) => onEffort(EFFORTS[Number(event.target.value)].value)} />
+          <div className="openrouter-reasoning-ticks" aria-hidden="true">{EFFORTS.map((entry, index) => <i key={entry.value} className={index <= effortIndex ? "reached" : ""} />)}</div>
+        </div>
+        <div className="openrouter-reasoning-labels">{EFFORTS.map((entry, index) => <span key={entry.value} className={index === effortIndex ? "active" : ""}>{entry.shortLabel}</span>)}</div>
+      </div>
+    </div>
+  );
+}
