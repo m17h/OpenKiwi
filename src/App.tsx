@@ -1,90 +1,78 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import {
+  Archive,
+  ArchiveRestore,
   ArrowUp,
   Bot,
-  Boxes,
   Check,
   ChevronDown,
-  ChevronRight,
   Circle,
   CircleStop,
   Code2,
   Command,
   Download,
-  ExternalLink,
   FileCode2,
   Folder,
   FolderOpen,
-  KeyRound,
   LoaderCircle,
-  Menu,
   MessageSquare,
-  Minus,
   Paperclip,
-  Palette,
   PanelRight,
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
   Pin,
   PinOff,
-  Play,
   Pencil,
-  RotateCcw,
   Search,
   Settings,
   Shield,
   ShieldAlert,
   ShieldCheck,
-  Sparkles,
   TerminalSquare,
   Trash2,
   UsersRound,
-  Wrench,
   X,
 } from "lucide-react";
 import {
   getCodexRuntimeStatus,
   auditEvent,
-  exportDiagnostics,
   getNormalChatWorkspace,
   hasOpenRouterKey,
   listOpenRouterModels,
-  onCodexEvent,
   respond,
   restartRuntime,
   rpc,
-  saveOpenRouterKey,
-  type CodexEvent,
   type CodexRuntimeStatus,
   type JsonObject,
 } from "./lib/codex";
 import { loadStored, storeValue } from "./lib/storage";
-import {
-  ModelPowerControl,
-  type ReasoningEffort,
-  type RuntimeModel,
-} from "./components/ModelPowerControl";
+import { DEFAULT_OPENAI_MODEL, DEFAULT_PROMPT_PROFILES, DEFAULT_SETTINGS, THEMES } from "./lib/appConfig";
+import { commandSandbox, threadStartParams, turnStartParams } from "./lib/turnConfig";
+import { threadSearchParams, threadsForWorkspace, type ThreadSearchResponse } from "./lib/threadSearch";
+import { optimisticStartedThread, upsertThread } from "./lib/threadList";
+import { type ReasoningEffort, ModelPowerControl, type RuntimeModel } from "./components/ModelPowerControl";
 import { OpenRouterModelControl, type OpenRouterModel } from "./components/OpenRouterModelControl";
 import { ApprovalCenter } from "./components/ApprovalCenter";
 import { CommandPalette } from "./components/CommandPalette";
-import { HarnessSettings } from "./components/HarnessSettings";
-import { SkillLibrary } from "./components/SkillLibrary";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import { SettingsModal } from "./components/SettingsModal";
+import { AuthRequiredModal, RuntimeSetupModal } from "./components/RuntimeModals";
 import type {
   AgentRecord,
   AttachmentRecord,
   CheckpointRecord,
   McpView,
   StudioTab,
-  TokenUsageView,
 } from "./components/StudioDock";
 import type {
   Account,
   Activity,
   AppSettings,
+  ArchivedThread,
   ChatMessage,
   CustomAgentProfile,
   PendingApproval,
@@ -93,7 +81,6 @@ import type {
   ProjectAction,
   PromptProfile,
   ScheduledTask,
-  ThemeName,
   Thread,
   ThreadItem,
   Turn,
@@ -101,7 +88,10 @@ import type {
 } from "./types";
 import { useTaskStore } from "./lib/taskStore";
 import { friendlyError } from "./lib/errors";
-import { type AppUpdater, updateProgress, useAppUpdater } from "./lib/appUpdater";
+import { useAppUpdater } from "./lib/appUpdater";
+import { useCodexEvents } from "./hooks/useCodexEvents";
+import { useScheduler } from "./hooks/useScheduler";
+import { useTerminal } from "./hooks/useTerminal";
 import {
   createLocalSkill,
   importLocalSkills,
@@ -119,37 +109,6 @@ const StudioDock = lazy(() => import("./components/StudioDock").then((module) =>
 const EMPTY_MESSAGES: ChatMessage[] = [];
 const EMPTY_ACTIVITIES: Activity[] = [];
 const EMPTY_AGENTS: AgentRecord[] = [];
-const RELEASE_NOTES_URL = "https://github.com/m17h/OpenKiwi/releases/latest";
-
-const THEMES: Array<{ id: ThemeName; name: string; description: string; swatches: [string, string, string] }> = [
-  { id: "kiwi", name: "OpenKiwi", description: "The original charcoal and electric green", swatches: ["#0c0d0f", "#171a1d", "#a7e26f"] },
-  { id: "midnight", name: "Midnight", description: "Deep navy with a crisp cyan signal", swatches: ["#080c14", "#111a28", "#73d7ff"] },
-  { id: "ember", name: "Ember", description: "Warm graphite with a copper glow", swatches: ["#100c0a", "#211712", "#f0a566"] },
-  { id: "violet", name: "Violet", description: "Ink black with an ultraviolet pulse", swatches: ["#0c0912", "#1b1428", "#c39bff"] },
-];
-
-const DEFAULT_SETTINGS: AppSettings = {
-  provider: "openai",
-  model: "gpt-5.6-sol",
-  permission: "ask",
-  systemPrompt: "",
-  promptProfileId: "empty",
-  projectInstructionsEnabled: false,
-  subagentsEnabled: false,
-  subagentMax: 3,
-  reasoningEffort: "medium",
-  ultra: false,
-  serviceTier: null,
-  theme: "kiwi",
-  notificationsEnabled: true,
-  terminalScrollback: 100_000,
-};
-
-const DEFAULT_PROMPT_PROFILES: PromptProfile[] = [
-  { id: "empty", name: "Empty", prompt: "", builtIn: true },
-  { id: "concise", name: "Concise builder", prompt: "Be concise, make progress autonomously, verify important changes, and clearly report results.", builtIn: true },
-  { id: "reviewer", name: "Careful reviewer", prompt: "Prioritize correctness, security, and maintainability. Inspect evidence before conclusions and flag uncertainty explicitly.", builtIn: true },
-];
 
 const initialProjects = loadStored<Project[]>("kiwi.projects", []).sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
 const initialWorkspaceMode: WorkspaceMode = loadStored<WorkspaceMode>("kiwi.workspaceMode", initialProjects.length ? "project" : "chat");
@@ -171,16 +130,6 @@ function basename(path: string): string {
 function normalizedProjectPath(path: string): string {
   const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
   return normalized || "/";
-}
-
-function decodeBase64Utf8(value: unknown): string {
-  if (typeof value !== "string" || !value) return "";
-  try {
-    const bytes = Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
-    return new TextDecoder().decode(bytes);
-  } catch {
-    return "";
-  }
 }
 
 function textFromUserContent(content: ThreadItem["content"]): string {
@@ -216,12 +165,6 @@ function PermissionIcon({ mode, size = 15 }: { mode: PermissionMode; size?: numb
   return <ShieldCheck size={size} />;
 }
 
-function commandSandbox(permission: PermissionMode, cwd: string): JsonObject {
-  if (permission === "full") return { type: "dangerFullAccess" };
-  if (permission === "read-only") return { type: "readOnly", networkAccess: false };
-  return { type: "workspaceWrite", writableRoots: [cwd], networkAccess: true, excludeTmpdirEnvVar: false, excludeSlashTmp: false };
-}
-
 export default function App() {
   const appUpdater = useAppUpdater();
   const [projects, setProjects] = useState<Project[]>(initialProjects);
@@ -240,7 +183,10 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [threadSearch, setThreadSearch] = useState("");
+  const [searchResults, setSearchResults] = useState<Thread[] | null>(null);
   const [pinnedThreadIds, setPinnedThreadIds] = useState<string[]>(() => loadStored("kiwi.pinnedThreads", []));
+  const [archivedThreads, setArchivedThreads] = useState<ArchivedThread[]>(() => loadStored("kiwi.archivedThreads", []));
+  const [archivedOpen, setArchivedOpen] = useState(false);
   const [renamingThreadId, setRenamingThreadId] = useState<string | null>(null);
   const [threadNameDraft, setThreadNameDraft] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -258,11 +204,6 @@ export default function App() {
   const [studioOpen, setStudioOpen] = useState(false);
   const [studioTab, setStudioTab] = useState<StudioTab>("review");
   const [approvedDiff, setApprovedDiff] = useState(false);
-  const [terminalCommand, setTerminalCommand] = useState("");
-  const [terminalOutput, setTerminalOutput] = useState("");
-  const [terminalRunning, setTerminalRunning] = useState(false);
-  const [terminalProcessId, setTerminalProcessId] = useState<string | null>(null);
-  const terminalSizeRef = useRef({ cols: 100, rows: 30 });
   const [checkpoints, setCheckpoints] = useState<CheckpointRecord[]>(() => loadStored("kiwi.checkpoints", []));
   const [attachments, setAttachments] = useState<AttachmentRecord[]>([]);
   const [rateSummary, setRateSummary] = useState("");
@@ -282,9 +223,12 @@ export default function App() {
   const [openRouterModelsLoading, setOpenRouterModelsLoading] = useState(false);
   const [openRouterModelsError, setOpenRouterModelsError] = useState("");
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const threadSearchRequestRef = useRef(0);
   if (threadProjectBindingsRef.current === null) {
     threadProjectBindingsRef.current = loadStored("kiwi.threadProjects", {});
   }
+
+  const terminal = useTerminal({ scrollback: settings.terminalScrollback, permission: settings.permission, onError: setError });
 
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === activeProjectId) ?? null,
@@ -310,13 +254,29 @@ export default function App() {
     return earliest;
   });
   const threadTasks = useTaskStore((state) => state.tasks);
-  const displayedThreads = useMemo(() => threads
-    .filter((thread) => `${thread.name ?? ""} ${thread.preview}`.toLowerCase().includes(threadSearch.toLowerCase()))
-    .sort((a, b) => Number(pinnedThreadIds.includes(b.id)) - Number(pinnedThreadIds.includes(a.id)) || b.updatedAt - a.updatedAt), [pinnedThreadIds, threadSearch, threads]);
+  const displayedThreads = useMemo(() => {
+    const query = threadSearch.trim().toLowerCase();
+    const merged = threads.filter((thread) => `${thread.name ?? ""} ${thread.preview}`.toLowerCase().includes(query));
+    for (const found of searchResults ?? []) {
+      if (!merged.some((thread) => thread.id === found.id)) merged.push(found);
+    }
+    return merged.sort((a, b) => Number(pinnedThreadIds.includes(b.id)) - Number(pinnedThreadIds.includes(a.id)) || b.updatedAt - a.updatedAt);
+  }, [pinnedThreadIds, searchResults, threadSearch, threads]);
+  const workspaceArchived = useMemo(() => activeWorkspace
+    ? archivedThreads.filter((record) => record.path === normalizedProjectPath(activeWorkspace.path))
+    : [], [activeWorkspace, archivedThreads]);
 
   const persistSettings = useCallback((next: AppSettings) => {
     setSettings(next);
     storeValue("kiwi.settings", next);
+  }, []);
+
+  const persistArchivedThreads = useCallback((update: (current: ArchivedThread[]) => ArchivedThread[]) => {
+    setArchivedThreads((current) => {
+      const next = update(current);
+      storeValue("kiwi.archivedThreads", next);
+      return next;
+    });
   }, []);
 
   const bindThreadToProject = useCallback((threadId: string, projectPath: string) => {
@@ -535,205 +495,50 @@ export default function App() {
     await refreshDiffFor(activeThreadId, activeProject.path);
   }, [activeProject, activeThreadId, refreshDiffFor]);
 
-  const handleItem = useCallback((threadId: string, item: ThreadItem) => {
-    const taskStore = useTaskStore.getState();
-    taskStore.ensureTask(threadId, threadProjectBindingsRef.current?.[threadId]);
-    const id = item.id ?? crypto.randomUUID();
-    if (item.type === "agentMessage" || item.type === "plan") {
-      taskStore.completeMessage(threadId, { id, role: "assistant", text: item.text ?? "", streaming: false });
-      return;
-    }
-    if (item.type === "commandExecution") {
-      taskStore.upsertActivity(threadId, {
-        id,
-        kind: "command",
-        title: item.command ?? "Run command",
-        detail: item.aggregatedOutput ?? item.cwd,
-        status: item.status,
-      });
-      return;
-    }
-    if (item.type === "fileChange") {
-      taskStore.upsertActivity(threadId, {
-        id,
-        kind: "file",
-        title: `${item.changes?.length ?? 0} file change${item.changes?.length === 1 ? "" : "s"}`,
-        status: item.status,
-      });
-      return;
-    }
-    if (item.type === "reasoning" && item.summary?.length) {
-      taskStore.upsertActivity(threadId, { id, kind: "reasoning", title: item.summary.join(" ") });
-      return;
-    }
-    if (item.type === "collabAgentToolCall") {
-      const titles: Record<string, string> = {
-        spawnAgent: `Spawn sub-agent${item.receiverThreadIds?.length === 1 ? "" : "s"}`,
-        sendInput: "Send input to sub-agent",
-        resumeAgent: "Resume sub-agent",
-        wait: "Wait for sub-agents",
-        closeAgent: "Close sub-agent",
-      };
-      taskStore.upsertActivity(threadId, {
-        id,
-        kind: "agent",
-        title: titles[item.tool ?? ""] ?? "Sub-agent activity",
-        detail: item.prompt ?? undefined,
-        status: item.status,
-      });
-      if (item.receiverThreadIds?.length) {
-        for (const childThreadId of item.receiverThreadIds) {
-          taskStore.upsertAgent(threadId, { id: childThreadId, prompt: item.prompt ?? "Delegated task", status: item.status ?? "inProgress" });
-          taskStore.ensureTask(childThreadId, threadProjectBindingsRef.current?.[threadId]);
-        }
+  // The event context is rebuilt each render so callbacks always see fresh
+  // state; useCodexEvents reads it through a ref and subscribes exactly once.
+  useCodexEvents({
+    bindingFor: (threadId) => threadProjectBindingsRef.current?.[threadId],
+    respond: (id, result) => respond(id, result),
+    audit: (kind, payload, threadId) => void auditEvent(kind, payload, threadId).catch(() => {}),
+    onStatus: setStatus,
+    onError: setError,
+    onAuthRequired: () => setAuthRequiredOpen(true),
+    onDiffReset: () => setApprovedDiff(false),
+    onRateSummary: setRateSummary,
+    onTerminalOutput: terminal.append,
+    onAccountUpdated: () => void refreshAccount(),
+    onLoginFailed: (message) => {
+      setError(message);
+      setAuthRequiredOpen(true);
+    },
+    onTurnCompleted: (threadId, turn) => {
+      if (turn) {
+        setActiveThread((current) => current && current.id === threadId
+          ? { ...current, turns: [...(current.turns ?? []).filter((entry) => entry.id !== turn.id), turn] }
+          : current);
       }
-      return;
-    }
-    if (item.type === "subAgentActivity") {
-      const action = item.kind === "started" ? "started" : item.kind === "interrupted" ? "interrupted" : "working";
-      taskStore.upsertActivity(threadId, {
-        id,
-        kind: "agent",
-        title: `Sub-agent ${action}`,
-        detail: item.agentPath || item.agentThreadId,
-        status: item.kind,
-      });
-      if (item.agentThreadId) {
-        taskStore.upsertAgent(threadId, { id: item.agentThreadId, prompt: "Delegated task", status: item.kind ?? "working", path: item.agentPath });
-      }
-    }
-  }, []);
-
-  useEffect(() => {
-    let stop: (() => void) | undefined;
-    void onCodexEvent((event: CodexEvent) => {
-      if (event.stream === "stderr") {
-        const line = event.line?.toLowerCase() ?? "";
-        if (line.includes("401 unauthorized")) {
-          setStatus("Sign-in required");
-          setError("Sign in to your ChatGPT account in Settings before using OpenAI models.");
-          setAuthRequiredOpen(true);
-        } else if (line.includes("error")) {
-          setStatus("Runtime issue");
-        }
-        return;
-      }
-
-      const method = event.method ?? "";
-      const params = event.params ?? {};
-      const eventThreadId = typeof params.threadId === "string"
-        ? params.threadId
-        : useTaskStore.getState().activeThreadId ?? "runtime";
-      if (event.id !== undefined && method === "currentTime/read") {
-        void respond(event.id, { currentTimeAt: Math.floor(Date.now() / 1000) });
-        return;
-      }
-      if (event.id !== undefined && (
-        method.includes("requestApproval")
-        || method.endsWith("Approval")
-        || method === "item/tool/requestUserInput"
-        || method === "mcpServer/elicitation/request"
-      )) {
-        useTaskStore.getState().enqueueApproval({
-          id: event.id,
-          method,
-          params,
-          threadId: eventThreadId,
-          receivedAt: Date.now(),
-        });
-        void auditEvent("approval.requested", { method, params }, eventThreadId).catch(() => {});
-        return;
-      }
-      if (method === "item/agentMessage/delta") {
-        useTaskStore.getState().queueAssistantDelta(eventThreadId, String(params.itemId), String(params.delta ?? ""));
-        return;
-      }
-      if (method === "item/started" || method === "item/completed") {
-        if (params.item && typeof params.item === "object") handleItem(eventThreadId, params.item as ThreadItem);
-        return;
-      }
-      if (method === "turn/diff/updated") {
-        useTaskStore.getState().setDiff(eventThreadId, String(params.diff ?? ""));
-        setApprovedDiff(false);
-        return;
-      }
-      if (method === "thread/tokenUsage/updated") {
-        const usage = params.tokenUsage as { total?: Partial<TokenUsageView>; modelContextWindow?: number | null } | undefined;
-        if (usage?.total) {
-          useTaskStore.getState().setUsage(eventThreadId, {
-            totalTokens: Number(usage.total.totalTokens ?? 0),
-            inputTokens: Number(usage.total.inputTokens ?? 0),
-            cachedInputTokens: Number(usage.total.cachedInputTokens ?? 0),
-            outputTokens: Number(usage.total.outputTokens ?? 0),
-            reasoningOutputTokens: Number(usage.total.reasoningOutputTokens ?? 0),
-            contextWindow: usage.modelContextWindow,
+      if (settings.notificationsEnabled && useTaskStore.getState().activeThreadId !== threadId) {
+        const thread = threads.find((entry) => entry.id === threadId);
+        const label = thread?.name || thread?.preview || "A background task";
+        const projectPath = threadProjectBindingsRef.current?.[threadId];
+        const projectName = projectPath && !projectPath.includes("normal-chats") ? basename(projectPath) : null;
+        void (async () => {
+          let granted = await isPermissionGranted();
+          if (!granted) granted = (await requestPermission()) === "granted";
+          if (granted) sendNotification({
+            title: "OpenKiwi task complete",
+            body: projectName ? `“${label}” finished in ${projectName}.` : `“${label}” finished.`,
           });
-        }
-        return;
+        })().catch(() => {});
       }
-      if (method === "command/exec/outputDelta") {
-        const delta = decodeBase64Utf8(params.deltaBase64);
-        setTerminalOutput((current) => `${current}${delta}`.slice(-settings.terminalScrollback));
-        return;
+      const projectPath = threadProjectBindingsRef.current?.[threadId];
+      if (projectPath && activeWorkspace && normalizedProjectPath(projectPath) === normalizedProjectPath(activeWorkspace.path)) {
+        void loadThreads(activeWorkspace);
       }
-      if (method === "account/rateLimits/updated") {
-        const limits = params.rateLimits as { primary?: { usedPercent?: number } } | undefined;
-        if (limits?.primary) setRateSummary(`${Math.round(limits.primary.usedPercent ?? 0)}% used`);
-        return;
-      }
-      if (method === "turn/started") {
-        useTaskStore.getState().setTaskStatus(eventThreadId, "running");
-        void auditEvent("turn.started", {}, eventThreadId).catch(() => {});
-        if (useTaskStore.getState().activeThreadId === eventThreadId) setStatus("Working");
-        return;
-      }
-      if (method === "turn/completed") {
-        if (params.turn && typeof params.turn === "object") {
-          const completedTurn = params.turn as unknown as Turn;
-          setActiveThread((current) => current && current.id === String(params.threadId) ? { ...current, turns: [...(current.turns ?? []).filter((turn) => turn.id !== completedTurn.id), completedTurn] } : current);
-        }
-        useTaskStore.getState().setTaskStatus(eventThreadId, "completed");
-        void auditEvent("turn.completed", {}, eventThreadId).catch(() => {});
-        if (settings.notificationsEnabled && useTaskStore.getState().activeThreadId !== eventThreadId) {
-          void (async () => {
-            let granted = await isPermissionGranted();
-            if (!granted) granted = (await requestPermission()) === "granted";
-            if (granted) sendNotification({ title: "OpenKiwi task complete", body: "A background coding task finished." });
-          })().catch(() => {});
-        }
-        if (useTaskStore.getState().activeThreadId === eventThreadId) setStatus("Ready");
-        const projectPath = threadProjectBindingsRef.current?.[eventThreadId];
-        if (projectPath && !projectPath.includes("normal-chats")) void refreshDiffFor(eventThreadId, projectPath);
-        return;
-      }
-      if (method === "thread/status/changed") {
-        const statusValue = params.status as { type?: string } | undefined;
-        const nextStatus = statusValue?.type === "active" ? "running" : statusValue?.type === "systemError" ? "error" : "idle";
-        useTaskStore.getState().setTaskStatus(eventThreadId, nextStatus);
-        return;
-      }
-      if (method === "error" || method === "warning" || method === "guardianWarning" || method === "configWarning") {
-        useTaskStore.getState().upsertActivity(eventThreadId, {
-          id: `${method}-${Date.now()}`,
-          kind: "warning",
-          title: String(params.message ?? params.error ?? "Runtime warning"),
-          detail: typeof params.details === "string" ? params.details : undefined,
-        });
-        return;
-      }
-      if (method === "account/updated") {
-        void refreshAccount();
-        return;
-      }
-      if (method === "account/login/completed" && params.success === false) {
-        setError(String(params.error ?? "Sign in did not complete"));
-        setAuthRequiredOpen(true);
-      }
-    }).then((unlisten) => {
-      stop = unlisten;
-    });
-    return () => stop?.();
-  }, [handleItem, refreshAccount, refreshDiffFor, settings.notificationsEnabled, settings.terminalScrollback]);
+      if (projectPath && !projectPath.includes("normal-chats")) void refreshDiffFor(threadId, projectPath);
+    },
+  });
 
   useEffect(() => {
     void getNormalChatWorkspace().then(setChatWorkspacePath).catch((reason) => setError(friendlyError(reason)));
@@ -769,8 +574,35 @@ export default function App() {
     useTaskStore.getState().setActiveThread(null);
     setAttachments([]);
     setApprovedDiff(false);
+    setThreadSearch("");
+    setSearchResults(null);
     if (!activeProject) setStudioOpen(false);
   }, [activeProject, activeWorkspace, loadThreads, refreshTools, runtimeStatus?.available]);
+
+  // Sidebar search also queries the runtime's full-text thread search, so
+  // matches are not limited to the loaded name/preview strings.
+  useEffect(() => {
+    const requestId = ++threadSearchRequestRef.current;
+    const query = threadSearch.trim();
+    if (!query || !activeWorkspace || !runtimeStatus?.available) {
+      setSearchResults(null);
+      return;
+    }
+    const workspacePath = activeWorkspace.path;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const result = await rpc<ThreadSearchResponse>("thread/search", threadSearchParams(query));
+          if (threadSearchRequestRef.current !== requestId) return;
+          setSearchResults(threadsForWorkspace(result.data ?? [], workspacePath, threadProjectBindingsRef.current ?? {}));
+        } catch {
+          if (threadSearchRequestRef.current !== requestId) return;
+          setSearchResults(null);
+        }
+      })();
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [activeWorkspace, runtimeStatus?.available, threadSearch]);
 
   const addProject = async () => {
     const selected = await open({ directory: true, multiple: false, title: "Choose a project folder" });
@@ -901,68 +733,27 @@ export default function App() {
       ];
       let threadId = activeThread?.id;
       if (!threadId) {
-        const sandbox = settings.permission === "read-only" ? "read-only" : settings.permission === "full" ? "danger-full-access" : "workspace-write";
-        const approvalPolicy = settings.permission === "ask" ? "on-request" : "never";
-        const startParams: JsonObject = {
-          cwd: activeWorkspace.path,
-          runtimeWorkspaceRoots: [activeWorkspace.path],
-          sandbox,
-          approvalPolicy,
-          baseInstructions: settings.systemPrompt,
-          developerInstructions: "",
-          config: {
-            project_doc_max_bytes: settings.projectInstructionsEnabled ? 32_768 : 0,
-            project_doc_fallback_filenames: [],
-            developer_instructions: "",
-            model_reasoning_effort: settings.ultra ? "ultra" : settings.reasoningEffort,
-            agents: {
-              max_threads: settings.subagentMax,
-              max_depth: 1,
-              ...Object.fromEntries(customAgents.filter((agent) => agent.enabled).map((agent) => [
-                agent.name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-") || agent.id,
-                {
-                  description: agent.description,
-                  instructions: agent.instructions,
-                  model: agent.model,
-                  model_reasoning_effort: agent.reasoningEffort,
-                },
-              ])),
-            },
-            features: {
-              multi_agent: settings.subagentsEnabled,
-            },
-          },
+        const result = await rpc<{ thread: Thread }>("thread/start", threadStartParams(settings, activeWorkspace.path, {
           serviceName: activeWorkspace.isChat ? "OpenKiwi Chat" : "OpenKiwi",
-          serviceTier: settings.serviceTier,
-        };
-        if (settings.model.trim()) startParams.model = settings.model.trim();
-        if (settings.provider === "openrouter") startParams.modelProvider = "openrouter";
-
-        const result = await rpc<{ thread: Thread }>("thread/start", startParams);
-        threadId = result.thread.id;
-        bindThreadToProject(result.thread.id, activeWorkspace.path);
-        setActiveThread(result.thread);
-        useTaskStore.getState().ensureTask(result.thread.id, activeWorkspace.path);
-        useTaskStore.getState().setActiveThread(result.thread.id);
+          customAgents,
+          interactive: true,
+        }));
+        const startedThread = optimisticStartedThread(result.thread, text);
+        threadId = startedThread.id;
+        bindThreadToProject(startedThread.id, activeWorkspace.path);
+        setThreads((current) => upsertThread(current, startedThread));
+        setActiveThread(startedThread);
+        useTaskStore.getState().ensureTask(startedThread.id, activeWorkspace.path);
+        useTaskStore.getState().setActiveThread(startedThread.id);
       }
 
       useTaskStore.getState().ensureTask(threadId, activeWorkspace.path);
       useTaskStore.getState().setTaskStatus(threadId, "starting");
       useTaskStore.getState().appendUserMessage(threadId, { id: `local-${crypto.randomUUID()}`, role: "user", text });
 
-      await rpc("turn/start", {
-        threadId,
-        input,
-        cwd: activeWorkspace.path,
-        runtimeWorkspaceRoots: [activeWorkspace.path],
-        sandboxPolicy: commandSandbox(settings.permission, activeWorkspace.path),
-        model: settings.model.trim() || undefined,
-        effort: settings.ultra ? "ultra" : settings.reasoningEffort,
-        serviceTier: settings.serviceTier,
-      });
+      await rpc("turn/start", turnStartParams(settings, threadId, activeWorkspace.path, input));
       setStartingTurn(false);
       setAttachments([]);
-      void loadThreads(activeWorkspace);
     } catch (reason) {
       setStartingTurn(false);
       if (activeThread?.id) useTaskStore.getState().setTaskStatus(activeThread.id, "error", friendlyError(reason));
@@ -1057,14 +848,38 @@ export default function App() {
     }
   };
 
-  const deleteThread = async (thread: Thread) => {
+  const archiveThread = async (thread: Thread) => {
     const label = thread.name || thread.preview || "Untitled thread";
-    if (!window.confirm(`Delete “${label}” from OpenKiwi's thread list?`)) return;
+    if (!window.confirm(`Archive “${label}”?\n\nIt moves to the Archived list in the sidebar, where you can restore or permanently delete it.`)) return;
     try {
       await rpc("thread/archive", { threadId: thread.id });
       if (activeThread?.id === thread.id) newThread();
       setThreads((current) => current.filter((entry) => entry.id !== thread.id));
+      const path = normalizedProjectPath(threadProjectBindingsRef.current?.[thread.id] || thread.cwd);
+      persistArchivedThreads((current) => [{ id: thread.id, label, path, archivedAt: Date.now() }, ...current.filter((entry) => entry.id !== thread.id)]);
+    } catch (reason) {
+      setError(friendlyError(reason));
+    }
+  };
+
+  const unarchiveThread = async (record: ArchivedThread) => {
+    try {
+      await rpc("thread/unarchive", { threadId: record.id });
+      persistArchivedThreads((current) => current.filter((entry) => entry.id !== record.id));
       void loadThreads(activeWorkspace);
+    } catch (reason) {
+      setError(friendlyError(reason));
+    }
+  };
+
+  const deleteThreadForever = async (threadId: string, label: string) => {
+    if (!window.confirm(`Permanently delete “${label}”?\n\nThis removes the conversation from the Codex runtime and cannot be undone.`)) return;
+    try {
+      await rpc("thread/delete", { threadId });
+      if (activeThread?.id === threadId) newThread();
+      setThreads((current) => current.filter((entry) => entry.id !== threadId));
+      persistArchivedThreads((current) => current.filter((entry) => entry.id !== threadId));
+      useTaskStore.getState().removeTask(threadId);
     } catch (reason) {
       setError(friendlyError(reason));
     }
@@ -1089,6 +904,14 @@ export default function App() {
     } catch (reason) { setError(friendlyError(reason)); }
   };
 
+  const compactThread = async () => {
+    if (!activeThread) return;
+    try {
+      await rpc("thread/compact/start", { threadId: activeThread.id });
+      setStatus("Compacting context");
+    } catch (reason) { setError(friendlyError(reason)); }
+  };
+
   const openAgent = async (threadId: string) => {
     try {
       const result = await rpc<{ thread: Thread }>("thread/read", { threadId, includeTurns: true });
@@ -1107,59 +930,13 @@ export default function App() {
     } catch (reason) { setError(friendlyError(reason)); }
   };
 
-  const runTerminal = async () => {
-    const command = terminalCommand.trim();
-    if (!command || !activeProject || terminalRunning) return;
-    const processId = crypto.randomUUID();
-    setTerminalProcessId(processId);
-    setTerminalRunning(true);
-    setTerminalOutput((current) => `${current}${current ? "\n" : ""}$ ${command}\n`);
-    setTerminalCommand("");
-    try {
-      const result = await rpc<{ exitCode: number; stdout: string; stderr: string }>("command/exec", {
-        command: ["/bin/zsh", "-lc", command],
-        processId,
-        tty: true,
-        streamStdoutStderr: true,
-        streamStdin: true,
-        size: terminalSizeRef.current,
-        cwd: activeProject.path,
-        timeoutMs: 300000,
-        sandboxPolicy: commandSandbox(settings.permission, activeProject.path),
-      });
-      if (result.stdout || result.stderr) setTerminalOutput((current) => current + result.stdout + result.stderr);
-      setTerminalOutput((current) => `${current}\n[exit ${result.exitCode}]\n`);
-    } catch (reason) {
-      setTerminalOutput((current) => `${current}\n${friendlyError(reason)}\n`);
-    } finally {
-      setTerminalRunning(false);
-      setTerminalProcessId(null);
-    }
-  };
-
-  const stopTerminal = async () => {
-    if (!terminalProcessId) return;
-    try { await rpc("command/exec/terminate", { processId: terminalProcessId }); } catch (reason) { setError(friendlyError(reason)); }
-  };
-
-  const writeTerminal = useCallback((value: string) => {
-    if (!terminalProcessId || !terminalRunning) return;
-    const bytes = new TextEncoder().encode(value);
-    let binary = "";
-    for (const byte of bytes) binary += String.fromCharCode(byte);
-    void rpc("command/exec/write", { processId: terminalProcessId, deltaBase64: btoa(binary) })
-      .catch((reason) => setError(friendlyError(reason)));
-  }, [terminalProcessId, terminalRunning]);
-
-  const resizeTerminal = useCallback((columns: number, rows: number) => {
-    terminalSizeRef.current = { cols: columns, rows };
-    if (!terminalProcessId || !terminalRunning) return;
-    void rpc("command/exec/resize", { processId: terminalProcessId, size: { cols: columns, rows } }).catch(() => {});
-  }, [terminalProcessId, terminalRunning]);
-
   const createCheckpoint = () => {
     if (!activeThread) return;
     const turnId = activeThread.turns?.at(-1)?.id;
+    if (!turnId) {
+      setError("Send a message first — a checkpoint marks the latest completed turn so you can fork from it.");
+      return;
+    }
     const checkpoint: CheckpointRecord = { id: crypto.randomUUID(), threadId: activeThread.id, turnId, label: `Checkpoint ${checkpoints.filter((item) => item.threadId === activeThread.id).length + 1}`, createdAt: Date.now() };
     const next = [checkpoint, ...checkpoints];
     setCheckpoints(next);
@@ -1204,8 +981,8 @@ export default function App() {
     const branch = `openkiwi/${stamp}`;
     try {
       const result = await executeCommand(["git", "worktree", "add", worktreePath, "-b", branch], activeProject.path);
-      setTerminalOutput((current) => `${current}\n$ git worktree add ${worktreePath} -b ${branch}\n${result.stdout}${result.stderr}`);
-      const project: Project = { id: crypto.randomUUID(), name: `${activeProject.name} · ${branch}`, path: worktreePath };
+      terminal.append(`\n$ git worktree add ${worktreePath} -b ${branch}\n${result.stdout}${result.stderr}`);
+      const project: Project = { id: crypto.randomUUID(), name: `${activeProject.name} · ${branch}`, path: worktreePath, worktree: { source: activeProject.path, branch } };
       const next = [...projects, project];
       setProjects(next);
       storeValue("kiwi.projects", next);
@@ -1252,13 +1029,13 @@ export default function App() {
   const runProjectAction = async (action: ProjectAction) => {
     if (!activeProject) return;
     setStudioTab("terminal");
-    setTerminalOutput((current) => `${current}${current ? "\n" : ""}$ ${action.command}\n`);
+    terminal.append(`${terminal.output ? "\n" : ""}$ ${action.command}\n`);
     try {
       const result = await executeCommand(["/bin/zsh", "-lc", action.command], activeProject.path);
-      setTerminalOutput((current) => `${current}${result.stdout}${result.stderr}\n[exit ${result.exitCode}]\n`);
+      terminal.append(`${result.stdout}${result.stderr}\n[exit ${result.exitCode}]\n`);
       void auditEvent("action.completed", { actionId: action.id, command: action.command, exitCode: result.exitCode }, activeThreadId ?? undefined).catch(() => {});
     } catch (reason) {
-      setTerminalOutput((current) => `${current}${friendlyError(reason)}\n`);
+      terminal.append(`${friendlyError(reason)}\n`);
     }
   };
 
@@ -1350,74 +1127,28 @@ export default function App() {
     } catch (reason) { setError(friendlyError(reason)); }
   };
 
-  const scheduledRunningRef = useRef(new Set<string>());
-  const runScheduledTask = useCallback(async (scheduled: ScheduledTask) => {
-    if (scheduledRunningRef.current.has(scheduled.id) || !runtimeStatus?.available) return;
-    const project = projects.find((item) => item.id === scheduled.projectId);
-    if (!project || (settings.provider === "openai" && account?.type !== "chatgpt") || (settings.provider === "openrouter" && !openRouterReady)) return;
-    scheduledRunningRef.current.add(scheduled.id);
-    try {
-      await ensureSkillRoots();
-      const sandbox = settings.permission === "read-only" ? "read-only" : settings.permission === "full" ? "danger-full-access" : "workspace-write";
-      const approvalPolicy = settings.permission === "ask" ? "on-request" : "never";
-      const started = await rpc<{ thread: Thread }>("thread/start", {
-        cwd: project.path,
-        runtimeWorkspaceRoots: [project.path],
-        sandbox,
-        approvalPolicy,
-        baseInstructions: settings.systemPrompt,
-        developerInstructions: "",
-        model: settings.model || undefined,
-        modelProvider: settings.provider === "openrouter" ? "openrouter" : undefined,
-        serviceTier: settings.serviceTier,
-        config: {
-          project_doc_max_bytes: settings.projectInstructionsEnabled ? 32_768 : 0,
-          developer_instructions: "",
-          model_reasoning_effort: settings.ultra ? "ultra" : settings.reasoningEffort,
-          agents: { max_threads: settings.subagentMax, max_depth: 1 },
-          features: { multi_agent: settings.subagentsEnabled },
-        },
-      });
-      bindThreadToProject(started.thread.id, project.path);
-      useTaskStore.getState().ensureTask(started.thread.id, project.path);
-      useTaskStore.getState().appendUserMessage(started.thread.id, { id: `scheduled-${crypto.randomUUID()}`, role: "user", text: scheduled.prompt });
-      useTaskStore.getState().setTaskStatus(started.thread.id, "starting");
-      await rpc("turn/start", {
-        threadId: started.thread.id,
-        input: [{ type: "text", text: scheduled.prompt, text_elements: [] }],
-        cwd: project.path,
-        runtimeWorkspaceRoots: [project.path],
-        sandboxPolicy: commandSandbox(settings.permission, project.path),
-        model: settings.model || undefined,
-        effort: settings.ultra ? "ultra" : settings.reasoningEffort,
-        serviceTier: settings.serviceTier,
-      });
-      const next = scheduledTasks.map((item) => item.id === scheduled.id ? { ...item, lastRunAt: Date.now(), lastThreadId: started.thread.id, nextRunAt: Date.now() + item.intervalMinutes * 60_000 } : item);
-      setScheduledTasks(next);
+  const updateSchedule = useCallback((id: string, patch: (current: ScheduledTask) => ScheduledTask) => {
+    setScheduledTasks((current) => {
+      const next = current.map((item) => item.id === id ? patch(item) : item);
       storeValue("kiwi.scheduledTasks", next);
-      void auditEvent("schedule.started", { scheduleId: scheduled.id, projectId: project.id }, started.thread.id).catch(() => {});
-      if (activeProject?.id === project.id) void loadThreads(project);
-    } catch (reason) {
-      const next = scheduledTasks.map((item) => item.id === scheduled.id ? { ...item, nextRunAt: Date.now() + 5 * 60_000 } : item);
-      setScheduledTasks(next);
-      storeValue("kiwi.scheduledTasks", next);
-      void auditEvent("schedule.failed", { scheduleId: scheduled.id, error: String(reason) }).catch(() => {});
-    } finally {
-      scheduledRunningRef.current.delete(scheduled.id);
-    }
-  }, [account?.type, activeProject?.id, bindThreadToProject, ensureSkillRoots, loadThreads, openRouterReady, projects, runtimeStatus?.available, scheduledTasks, settings]);
+      return next;
+    });
+  }, []);
 
-  useEffect(() => {
-    const check = () => {
-      const now = Date.now();
-      for (const scheduled of scheduledTasks) {
-        if (scheduled.enabled && scheduled.nextRunAt <= now) void runScheduledTask(scheduled);
-      }
-    };
-    check();
-    const timer = window.setInterval(check, 30_000);
-    return () => window.clearInterval(timer);
-  }, [runScheduledTask, scheduledTasks]);
+  useScheduler({
+    schedules: scheduledTasks,
+    updateSchedule,
+    projects,
+    settings,
+    runtimeAvailable: Boolean(runtimeStatus?.available),
+    chatGptConnected: account?.type === "chatgpt",
+    openRouterReady,
+    ensureSkillRoots,
+    bindThreadToProject,
+    onThreadStarted: (project) => {
+      if (activeProject?.id === project.id) void loadThreads(project);
+    },
+  });
 
   return (
     <div className="app-shell" data-theme={settings.theme}>
@@ -1499,7 +1230,7 @@ export default function App() {
             <span className="section-label">{workspaceMode === "chat" ? "Chat threads" : "Project threads"}</span>
             {activeWorkspace && <span className="thread-count">{threads.length}</span>}
           </div>
-          {threads.length > 4 && <label className="thread-search"><Search size={11} /><input value={threadSearch} onChange={(event) => setThreadSearch(event.target.value)} placeholder="Filter threads…" /></label>}
+          {activeWorkspace && <label className="thread-search"><Search size={11} /><input value={threadSearch} onChange={(event) => setThreadSearch(event.target.value)} placeholder="Search threads…" /></label>}
           <div className={`thread-scope-hint ${workspaceMode}`}>
             {workspaceMode === "chat" ? <MessageSquare size={12} /> : <Folder size={12} />}
             <span>{workspaceMode === "chat" ? "Not tied to a project folder" : activeProject ? `Working in ${activeProject.name}` : "Select a project above"}</span>
@@ -1533,12 +1264,35 @@ export default function App() {
                 <div className="thread-actions">
                   <button onMouseDown={(event) => event.preventDefault()} onClick={() => toggleThreadPin(thread.id)} title={pinnedThreadIds.includes(thread.id) ? "Unpin thread" : "Pin thread"} aria-label={`${pinnedThreadIds.includes(thread.id) ? "Unpin" : "Pin"} ${thread.name || thread.preview || "thread"}`}><Pin size={12} /></button>
                   <button onMouseDown={(event) => event.preventDefault()} onClick={() => startThreadRename(thread)} title="Rename thread" aria-label={`Rename ${thread.name || thread.preview || "thread"}`}><Pencil size={12} /></button>
-                  <button className="danger" onMouseDown={(event) => event.preventDefault()} onClick={() => void deleteThread(thread)} title="Delete thread" aria-label={`Delete ${thread.name || thread.preview || "thread"}`}><Trash2 size={12} /></button>
+                  <button onMouseDown={(event) => event.preventDefault()} onClick={() => void archiveThread(thread)} title="Archive thread" aria-label={`Archive ${thread.name || thread.preview || "thread"}`}><Archive size={12} /></button>
+                  <button className="danger" onMouseDown={(event) => event.preventDefault()} onClick={() => void deleteThreadForever(thread.id, thread.name || thread.preview || "Untitled thread")} title="Delete thread permanently" aria-label={`Permanently delete ${thread.name || thread.preview || "thread"}`}><Trash2 size={12} /></button>
                 </div>
               </div>
             ))}
             {activeWorkspace && !threads.length && <div className="empty-threads">{workspaceMode === "chat" ? "No normal chats yet" : "No threads in this project yet"}</div>}
           </div>
+          {workspaceArchived.length > 0 && (
+            <div className="archived-threads">
+              <button className="archived-toggle" onClick={() => setArchivedOpen((open) => !open)} aria-expanded={archivedOpen}>
+                <Archive size={12} />
+                <span>Archived</span>
+                <span className="thread-count">{workspaceArchived.length}</span>
+                <ChevronDown className={archivedOpen ? "open" : ""} size={12} />
+              </button>
+              {archivedOpen && workspaceArchived.map((record) => (
+                <div key={record.id} className="thread-row-wrap archived">
+                  <span className="thread-row archived-label" title={`Archived ${new Date(record.archivedAt).toLocaleString()}`}>
+                    <Archive size={13} />
+                    <span>{record.label}</span>
+                  </span>
+                  <div className="thread-actions">
+                    <button onClick={() => void unarchiveThread(record)} title="Restore thread" aria-label={`Restore ${record.label}`}><ArchiveRestore size={12} /></button>
+                    <button className="danger" onClick={() => void deleteThreadForever(record.id, record.label)} title="Delete thread permanently" aria-label={`Permanently delete ${record.label}`}><Trash2 size={12} /></button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="sidebar-footer">
@@ -1612,14 +1366,16 @@ export default function App() {
                   {!activeWorkspace.isChat && <div className="empty-state-actions" aria-label="Project workspace shortcuts"><button onClick={() => openStudio("files")}><FileCode2 size={14} /> Browse files</button><button onClick={() => openStudio("terminal")}><TerminalSquare size={14} /> Terminal</button><button onClick={() => openStudio("review")}><Search size={14} /> Review changes</button></div>}
                 </div>
               ) : (
-                <Suspense fallback={<div className="timeline-loading"><LoaderCircle className="spin" size={15} /> Loading conversation…</div>}>
-                  <ChatTimeline
-                    messages={messages}
-                    activities={activities}
-                    running={running}
-                    thinkingLabel={activeWorkspace.isChat ? "Thinking in normal chat" : `Working in ${activeProject?.name}`}
-                  />
-                </Suspense>
+                <ErrorBoundary label="conversation">
+                  <Suspense fallback={<div className="timeline-loading"><LoaderCircle className="spin" size={15} /> Loading conversation…</div>}>
+                    <ChatTimeline
+                      messages={messages}
+                      activities={activities}
+                      running={running}
+                      thinkingLabel={activeWorkspace.isChat ? "Thinking in normal chat" : `Working in ${activeProject?.name}`}
+                    />
+                  </Suspense>
+                </ErrorBoundary>
               )}
             </section>
 
@@ -1637,7 +1393,7 @@ export default function App() {
                   value={draft}
                   onChange={(event) => setDraft(event.target.value)}
                   onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey) {
+                    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
                       event.preventDefault();
                       void sendMessage();
                     }
@@ -1647,13 +1403,13 @@ export default function App() {
                 />
                 {settings.provider === "openai" && (
                   <ModelPowerControl
-                    model={settings.model || "gpt-5.6-sol"}
+                    model={settings.model || DEFAULT_OPENAI_MODEL}
                     effort={settings.reasoningEffort}
                     ultra={settings.ultra}
                     fast={settings.serviceTier === "priority"}
                     runtimeModels={runtimeModels}
                     onModel={(model) => persistSettings({ ...settings, model })}
-                    onEffort={(reasoningEffort) => persistSettings({ ...settings, reasoningEffort, ultra: false })}
+                    onEffort={(reasoningEffort: ReasoningEffort) => persistSettings({ ...settings, reasoningEffort, ultra: false })}
                     onUltra={(ultra) => persistSettings({ ...settings, ultra, subagentsEnabled: ultra ? true : settings.subagentsEnabled })}
                     onFast={(fast) => persistSettings({ ...settings, serviceTier: fast ? "priority" : null })}
                   />
@@ -1734,66 +1490,69 @@ export default function App() {
         )}
       </main>
 
-      <Suspense fallback={null}><StudioDock
-        open={studioOpen && Boolean(activeProject)}
-        tab={studioTab}
-        projectName={activeProject?.name}
-        projectPath={activeProject?.path}
-        activeThread={Boolean(activeThread)}
-        diff={diff}
-        approvedDiff={approvedDiff}
-        agents={agentRecords}
-        terminalOutput={terminalOutput}
-        terminalCommand={terminalCommand}
-        terminalRunning={terminalRunning}
-        checkpoints={checkpoints.filter((item) => !activeThread || item.threadId === activeThread.id)}
-        attachments={attachments}
-        usage={tokenUsage}
-        rateSummary={rateSummary}
-        skills={skills}
-        mcpServers={mcpServers}
-        gitOutput={gitOutput}
-        gitCommitMessage={gitCommitMessage}
-        promptAudit={[
-          { label: "Base instruction", value: settings.systemPrompt ? `custom · ${settings.systemPrompt.length} chars` : "empty" },
-          { label: "Developer instruction", value: "empty" },
-          { label: "Project instructions", value: settings.projectInstructionsEnabled ? "enabled · AGENTS.md up to 32 KB" : "disabled" },
-          { label: "Model", value: settings.model || "provider default" },
-          { label: "Reasoning", value: settings.ultra ? "ultra" : settings.reasoningEffort },
-          { label: "Sub-agents", value: settings.subagentsEnabled ? `on · max ${settings.subagentMax}` : "off" },
-          { label: "Skills", value: skillsFolder ? `${skills.filter((skill) => skill.enabled).length} enabled · local folder` : "no folder selected" },
-          { label: "Permissions", value: permissionLabel(settings.permission) },
-          { label: "Service tier", value: settings.serviceTier || "standard" },
-        ]}
-        projectActions={projectActions}
-        onTab={setStudioTab}
-        onClose={() => setStudioOpen(false)}
-        onRefreshDiff={() => void refreshDiff()}
-        onReview={() => void startReview()}
-        onApproveDiff={() => setApprovedDiff((approved) => !approved)}
-        onOpenAgent={(id) => void openAgent(id)}
-        onStopAgent={(id) => void stopAgent(id)}
-        onTerminalCommand={setTerminalCommand}
-        onRunTerminal={() => void runTerminal()}
-        onStopTerminal={() => void stopTerminal()}
-        onTerminalInput={writeTerminal}
-        onTerminalResize={resizeTerminal}
-        onCheckpoint={createCheckpoint}
-        onFork={(checkpoint) => void forkThread(checkpoint)}
-        onRollback={() => void rollbackTurn()}
-        onWorktree={() => void createWorktree()}
-        onAddAttachment={() => void addAttachment()}
-        onRemoveAttachment={(path) => setAttachments((current) => current.filter((item) => item.path !== path))}
-        onRefreshUsage={() => void refreshUsage()}
-        onRefreshTools={() => void refreshTools(activeProject)}
-        onGitAction={(action) => void runGitAction(action)}
-        onGitCommitMessage={setGitCommitMessage}
-        onGitPathAction={(action, path) => void runGitPathAction(action, path)}
-        onAttachPath={(path) => setAttachments((current) => current.some((item) => item.path === path) ? current : [...current, { path, name: basename(path), kind: "file" }])}
-        onProjectAction={(action) => void runProjectAction(action)}
-        onToggleSkill={(skill) => void toggleSkill(skill)}
-        onConnectMcp={(server) => void connectMcp(server)}
-      /></Suspense>
+      <ErrorBoundary label="workspace tools">
+        <Suspense fallback={null}><StudioDock
+          open={studioOpen && Boolean(activeProject)}
+          tab={studioTab}
+          projectName={activeProject?.name}
+          projectPath={activeProject?.path}
+          activeThread={Boolean(activeThread)}
+          diff={diff}
+          approvedDiff={approvedDiff}
+          agents={agentRecords}
+          terminalOutput={terminal.output}
+          terminalCommand={terminal.command}
+          terminalRunning={terminal.running}
+          checkpoints={checkpoints.filter((item) => !activeThread || item.threadId === activeThread.id)}
+          attachments={attachments}
+          usage={tokenUsage}
+          rateSummary={rateSummary}
+          skills={skills}
+          mcpServers={mcpServers}
+          gitOutput={gitOutput}
+          gitCommitMessage={gitCommitMessage}
+          promptAudit={[
+            { label: "Base instruction", value: settings.systemPrompt ? `custom · ${settings.systemPrompt.length} chars` : "empty" },
+            { label: "Developer instruction", value: "empty" },
+            { label: "Project instructions", value: settings.projectInstructionsEnabled ? "enabled · AGENTS.md up to 32 KB" : "disabled" },
+            { label: "Model", value: settings.model || "provider default" },
+            { label: "Reasoning", value: settings.ultra ? "ultra" : settings.reasoningEffort },
+            { label: "Sub-agents", value: settings.subagentsEnabled ? `on · max ${settings.subagentMax}` : "off" },
+            { label: "Skills", value: skillsFolder ? `${skills.filter((skill) => skill.enabled).length} enabled · local folder` : "no folder selected" },
+            { label: "Permissions", value: permissionLabel(settings.permission) },
+            { label: "Service tier", value: settings.serviceTier || "standard" },
+          ]}
+          projectActions={projectActions}
+          onTab={setStudioTab}
+          onClose={() => setStudioOpen(false)}
+          onRefreshDiff={() => void refreshDiff()}
+          onReview={() => void startReview()}
+          onApproveDiff={() => setApprovedDiff((approved) => !approved)}
+          onOpenAgent={(id) => void openAgent(id)}
+          onStopAgent={(id) => void stopAgent(id)}
+          onTerminalCommand={terminal.setCommand}
+          onRunTerminal={() => { if (activeProject) void terminal.run(activeProject.path); }}
+          onStopTerminal={() => void terminal.stop()}
+          onTerminalInput={terminal.write}
+          onTerminalResize={terminal.resize}
+          onCheckpoint={createCheckpoint}
+          onFork={(checkpoint) => void forkThread(checkpoint)}
+          onRollback={() => void rollbackTurn()}
+          onWorktree={() => void createWorktree()}
+          onAddAttachment={() => void addAttachment()}
+          onRemoveAttachment={(path) => setAttachments((current) => current.filter((item) => item.path !== path))}
+          onRefreshUsage={() => void refreshUsage()}
+          onCompact={() => void compactThread()}
+          onRefreshTools={() => void refreshTools(activeProject)}
+          onGitAction={(action) => void runGitAction(action)}
+          onGitCommitMessage={setGitCommitMessage}
+          onGitPathAction={(action, path) => void runGitPathAction(action, path)}
+          onAttachPath={(path) => setAttachments((current) => current.some((item) => item.path === path) ? current : [...current, { path, name: basename(path), kind: "file" }])}
+          onProjectAction={(action) => void runProjectAction(action)}
+          onToggleSkill={(skill) => void toggleSkill(skill)}
+          onConnectMcp={(server) => void connectMcp(server)}
+        /></Suspense>
+      </ErrorBoundary>
 
       <SettingsModal
         open={settingsOpen}
@@ -1866,488 +1625,4 @@ export default function App() {
       />
     </div>
   );
-}
-
-function RuntimeSetupModal({
-  open,
-  checking,
-  onClose,
-  onRetry,
-}: {
-  open: boolean;
-  checking: boolean;
-  onClose: () => void;
-  onRetry: () => void;
-}) {
-  return (
-    <div className={`modal-backdrop runtime-setup-backdrop ${open ? "open" : "closed"}`} onMouseDown={onClose} aria-hidden={!open} inert={!open ? true : undefined}>
-      <div className="runtime-setup-modal" role="dialog" aria-modal="true" aria-labelledby="runtime-setup-title" onMouseDown={(event) => event.stopPropagation()}>
-        <button className="runtime-setup-close" onClick={onClose} aria-label="Close Codex setup"><X size={17} /></button>
-        <div className="runtime-setup-mark"><TerminalSquare size={25} /></div>
-        <div className="runtime-setup-copy">
-          <span className="runtime-eyebrow">One-time setup</span>
-          <h2 id="runtime-setup-title">Connect the Codex runtime</h2>
-          <p>OpenKiwi uses Codex App Server locally for ChatGPT subscription sign-in, OpenRouter, tools, approvals, and threads. Install either option below—never both.</p>
-        </div>
-        <div className="runtime-options">
-          <div className="runtime-option recommended">
-            <span className="runtime-option-icon"><Download size={17} /></span>
-            <div><strong>Codex CLI <em>Recommended</em></strong><small>The dependable cross-platform option and easiest runtime to keep current.</small></div>
-          </div>
-          <div className="runtime-option">
-            <span className="runtime-option-icon chatgpt"><Sparkles size={17} /></span>
-            <div><strong>ChatGPT for macOS</strong><small>Already includes a usable Codex runtime. OpenKiwi detects it automatically.</small></div>
-          </div>
-        </div>
-        <div className="runtime-note"><Check size={13} /> Your ChatGPT login still happens in the official browser flow and remains isolated to OpenKiwi.</div>
-        <div className="runtime-setup-actions">
-          <button className="secondary-button" onClick={onClose}>Not now</button>
-          <button className="secondary-button" onClick={() => void openUrl("https://learn.chatgpt.com/docs/codex/cli")}><ExternalLink size={13} /> Installation guide</button>
-          <button className="primary-button" onClick={onRetry} disabled={checking}>{checking ? <LoaderCircle className="spin" size={14} /> : <RotateCcw size={13} />} Try again</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function AuthRequiredModal({
-  open,
-  busy,
-  onClose,
-  onSignIn,
-}: {
-  open: boolean;
-  busy: boolean;
-  onClose: () => void;
-  onSignIn: () => void;
-}) {
-  return (
-    <div className={`modal-backdrop runtime-setup-backdrop auth-required-backdrop ${open ? "open" : "closed"}`} onMouseDown={onClose} aria-hidden={!open} inert={!open ? true : undefined}>
-      <div className="runtime-setup-modal auth-required-modal" role="dialog" aria-modal="true" aria-labelledby="auth-required-title" onMouseDown={(event) => event.stopPropagation()}>
-        <button className="runtime-setup-close" onClick={onClose} aria-label="Close sign-in prompt"><X size={17} /></button>
-        <div className="runtime-setup-mark auth-mark"><KeyRound size={24} /></div>
-        <div className="runtime-setup-copy">
-          <span className="runtime-eyebrow">ChatGPT authentication</span>
-          <h2 id="auth-required-title">Sign in before sending</h2>
-          <p>OpenAI models cannot receive this prompt until a ChatGPT account is connected. Your draft is still waiting in the composer and has not been sent.</p>
-        </div>
-        <div className="auth-required-detail">
-          <ShieldCheck size={17} />
-          <div><strong>Official browser sign-in</strong><small>Codex opens ChatGPT in your default browser and stores the resulting session inside OpenKiwi’s isolated credential store.</small></div>
-        </div>
-        <div className="runtime-setup-actions">
-          <button className="secondary-button" onClick={onClose}>Not now</button>
-          <button className="primary-button" onClick={onSignIn} disabled={busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <ExternalLink size={13} />} Sign in with ChatGPT</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function SettingsModal({
-  open,
-  appUpdater,
-  settings,
-  account,
-  runtimeStatus,
-  openRouterReady,
-  onClose,
-  onSave,
-  onAccountChange,
-  onSignIn,
-  onRuntimeRequired,
-  onWorkspaceTools,
-  onOpenRouterChange,
-  onError,
-  profiles,
-  agents,
-  actions,
-  schedules,
-  projects,
-  skillsFolder,
-  skills,
-  skillsBusy,
-  skillsError,
-  workspaceToolsAvailable,
-  onProfiles,
-  onAgents,
-  onActions,
-  onSchedules,
-  onChooseSkillsFolder,
-  onRefreshSkills,
-  onImportSkills,
-  onCreateSkill,
-  onRenameSkill,
-  onToggleSkill,
-}: {
-  open: boolean;
-  appUpdater: AppUpdater;
-  settings: AppSettings;
-  account: Account | null;
-  runtimeStatus: CodexRuntimeStatus | null;
-  openRouterReady: boolean;
-  onClose: () => void;
-  onSave: (settings: AppSettings) => void;
-  onAccountChange: () => Promise<void>;
-  onSignIn: () => Promise<void>;
-  onRuntimeRequired: () => void;
-  onWorkspaceTools: () => void;
-  onOpenRouterChange: (ready: boolean) => void;
-  onError: (error: string | null) => void;
-  profiles: PromptProfile[];
-  agents: CustomAgentProfile[];
-  actions: ProjectAction[];
-  schedules: ScheduledTask[];
-  projects: Project[];
-  skillsFolder: string;
-  skills: LocalSkill[];
-  skillsBusy: boolean;
-  skillsError: string;
-  workspaceToolsAvailable: boolean;
-  onProfiles: (value: PromptProfile[]) => void;
-  onAgents: (value: CustomAgentProfile[]) => void;
-  onActions: (value: ProjectAction[]) => void;
-  onSchedules: (value: ScheduledTask[]) => void;
-  onChooseSkillsFolder: () => void;
-  onRefreshSkills: () => void;
-  onImportSkills: () => void;
-  onCreateSkill: (name: string, instructions: string) => Promise<boolean>;
-  onRenameSkill: (path: string, name: string) => boolean;
-  onToggleSkill: (path: string) => void;
-}) {
-  const [local, setLocal] = useState(settings);
-  const [apiKey, setApiKey] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [settingsSection, setSettingsSection] = useState<"general" | "models" | "prompts" | "agents" | "workflows" | "skills" | "tools" | "updates">("general");
-
-  useEffect(() => {
-    if (open) {
-      setLocal(settings);
-      if (appUpdater.phase === "available") setSettingsSection("updates");
-    }
-  }, [appUpdater.phase, open, settings]);
-
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [onClose, open]);
-
-  const signIn = async () => {
-    if (!runtimeStatus?.available) {
-      onRuntimeRequired();
-      return;
-    }
-    setBusy(true);
-    onError(null);
-    try {
-      await onSignIn();
-    } catch (reason) {
-      onError(friendlyError(reason));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const signOut = async () => {
-    setBusy(true);
-    try {
-      await rpc("account/logout");
-      await onAccountChange();
-    } catch (reason) {
-      onError(friendlyError(reason));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const storeKey = async () => {
-    if (!apiKey.trim()) return;
-    setBusy(true);
-    try {
-      await saveOpenRouterKey(apiKey);
-      setApiKey("");
-      onOpenRouterChange(true);
-    } catch (reason) {
-      onError(friendlyError(reason));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const exportDiagnosticBundle = async () => {
-    try {
-      const path = await save({ title: "Export OpenKiwi diagnostics", defaultPath: `openkiwi-diagnostics-${new Date().toISOString().slice(0, 10)}.json`, filters: [{ name: "JSON", extensions: ["json"] }] });
-      if (path) await exportDiagnostics(path);
-    } catch (reason) { onError(friendlyError(reason)); }
-  };
-
-  return (
-    <div className={`modal-backdrop settings-backdrop ${open ? "open" : "closed"}`} onMouseDown={onClose} aria-hidden={!open} inert={!open ? true : undefined}>
-      <div className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
-        <div className="modal-header">
-          <div><h2 id="settings-title">Settings</h2><p>Customize OpenKiwi without hidden configuration.</p></div>
-          <button className="icon-button" onClick={onClose} aria-label="Close settings"><X size={18} /></button>
-        </div>
-
-        <div className="settings-layout">
-          <nav className="settings-nav" aria-label="Settings categories">
-            {([
-              ["general", "General", Palette],
-              ["models", "Models & accounts", KeyRound],
-              ["prompts", "Prompts", Sparkles],
-              ["agents", "Agents", UsersRound],
-              ["workflows", "Workflows", Play],
-              ["skills", "Skills", Boxes],
-              ["tools", "Tools & MCP", Wrench],
-              ["updates", "Updates", Download],
-            ] as const).map(([id, label, Icon]) => <button key={id} className={settingsSection === id ? "active" : ""} onClick={() => setSettingsSection(id)} aria-current={settingsSection === id ? "page" : undefined}><Icon size={14} /><span>{label}</span><ChevronRight size={12} /></button>)}
-          </nav>
-          <div className="settings-content">
-          <div className="settings-pane-heading"><span>{settingsSection === "general" ? "General" : settingsSection === "models" ? "Models & accounts" : settingsSection === "prompts" ? "Prompts" : settingsSection === "agents" ? "Agents" : settingsSection === "workflows" ? "Workflows" : settingsSection === "skills" ? "Skills" : settingsSection === "tools" ? "Tools & MCP" : "Updates"}</span><small>{settingsSection === "general" ? "Appearance, runtime behavior, and diagnostics" : settingsSection === "models" ? "Providers, credentials, and model routing" : settingsSection === "prompts" ? "Your complete harness instruction and reusable profiles" : settingsSection === "agents" ? "Delegation limits and specialist configurations" : settingsSection === "workflows" ? "Reusable project actions and scheduled tasks" : settingsSection === "skills" ? "Local Markdown workflows with model-facing invocation names" : settingsSection === "tools" ? "Model Context Protocol servers and live tool controls" : "Secure releases delivered directly from the OpenKiwi repository"}</small></div>
-          {settingsSection === "general" &&
-          <section className="settings-section theme-settings-section">
-            <div className="settings-section-heading settings-heading-with-action">
-              <div className="settings-icon"><Palette size={17} /></div>
-              <div><h3>Appearance</h3><p>Choose a color atmosphere for OpenKiwi. Your selection is stored on this device.</p></div>
-              <button type="button" className="default-theme-button" onClick={() => setLocal({ ...local, theme: DEFAULT_SETTINGS.theme })} disabled={local.theme === DEFAULT_SETTINGS.theme}>
-                <RotateCcw size={12} /> App default
-              </button>
-            </div>
-            <div className="theme-grid">
-              {THEMES.map((theme) => (
-                <button
-                  type="button"
-                  key={theme.id}
-                  className={`theme-card ${local.theme === theme.id ? "selected" : ""}`}
-                  aria-pressed={local.theme === theme.id}
-                  onClick={() => setLocal({ ...local, theme: theme.id })}
-                >
-                  <span className="theme-preview" style={{ background: theme.swatches[0] }}>
-                    <i style={{ background: theme.swatches[1] }} />
-                    <i style={{ background: theme.swatches[2] }} />
-                  </span>
-                  <span><strong>{theme.name}</strong><small>{theme.description}</small></span>
-                  {local.theme === theme.id && <Check size={14} />}
-                </button>
-              ))}
-            </div>
-          </section>}
-
-          {settingsSection === "prompts" &&
-          <section className="settings-section">
-            <div className="settings-section-heading">
-              <div className="settings-icon"><Sparkles size={17} /></div>
-              <div><h3>Instruction prompt</h3><p>Sent as the thread’s complete base instruction. Empty means OpenKiwi supplies no base prompt.</p></div>
-            </div>
-            <textarea
-              className="prompt-editor"
-              value={local.systemPrompt}
-              onChange={(event) => setLocal({ ...local, systemPrompt: event.target.value })}
-              placeholder="Empty — add your own instructions here"
-              rows={7}
-            />
-            <div className="prompt-audit-row">
-              <span><Check size={13} /> Base prompt visible</span>
-              <span><Check size={13} /> Developer prompt empty</span>
-              <span><Check size={13} /> Project instructions {local.projectInstructionsEnabled ? "enabled" : "disabled"}</span>
-            </div>
-          </section>}
-
-          {(["prompts", "agents", "workflows", "tools"] as const).includes(settingsSection as "prompts" | "agents" | "workflows" | "tools") && <HarnessSettings
-            section={settingsSection as "prompts" | "agents" | "workflows" | "tools"}
-            settings={local}
-            profiles={profiles}
-            agents={agents}
-            actions={actions}
-            schedules={schedules}
-            projects={projects}
-            onSettings={setLocal}
-            onProfiles={onProfiles}
-            onAgents={onAgents}
-            onActions={onActions}
-            onSchedules={onSchedules}
-          />}
-
-          {settingsSection === "tools" && <div className="settings-workspace-link"><div><strong>Live tool controls</strong><small>{workspaceToolsAvailable ? "Inspect skills, connect configured MCP servers, and run project actions in the active workspace." : "Select a project to inspect live skills, MCP servers, and project actions."}</small></div><button className="secondary-button" onClick={onWorkspaceTools} disabled={!workspaceToolsAvailable}><PanelRight size={13} /> Open workspace tools</button></div>}
-
-          {settingsSection === "skills" && <SkillLibrary
-            folder={skillsFolder}
-            skills={skills}
-            busy={skillsBusy}
-            error={skillsError}
-            onChooseFolder={onChooseSkillsFolder}
-            onRefresh={onRefreshSkills}
-            onImport={onImportSkills}
-            onCreate={onCreateSkill}
-            onRename={onRenameSkill}
-            onToggle={onToggleSkill}
-          />}
-
-          {settingsSection === "updates" && <UpdateSettings appUpdater={appUpdater} />}
-
-          {settingsSection === "general" &&
-          <section className="settings-section">
-            <div className="settings-section-heading"><div className="settings-icon"><Wrench size={17} /></div><div><h3>Runtime behavior</h3><p>Control project guidance, background alerts, service tier, and terminal memory.</p></div></div>
-            <div className="behavior-grid">
-              <div><span><strong>Project instructions</strong><small>Allow AGENTS.md discovery for project threads (up to 32 KB).</small></span><button type="button" role="switch" aria-checked={local.projectInstructionsEnabled} className={`toggle-switch ${local.projectInstructionsEnabled ? "on" : ""}`} onClick={() => setLocal({ ...local, projectInstructionsEnabled: !local.projectInstructionsEnabled })}><span /></button></div>
-              <div><span><strong>Desktop notifications</strong><small>Notify when a background task finishes.</small></span><button type="button" role="switch" aria-checked={local.notificationsEnabled} className={`toggle-switch ${local.notificationsEnabled ? "on" : ""}`} onClick={() => setLocal({ ...local, notificationsEnabled: !local.notificationsEnabled })}><span /></button></div>
-            </div>
-            <div className="runtime-field-grid"><label><span>OpenAI service tier</span><select value={local.serviceTier ?? ""} onChange={(event) => setLocal({ ...local, serviceTier: event.target.value || null })}><option value="">Standard</option><option value="priority">Fast / priority</option></select></label><label><span>Terminal scrollback</span><select value={local.terminalScrollback} onChange={(event) => setLocal({ ...local, terminalScrollback: Number(event.target.value) })}><option value={25000}>25k characters</option><option value={100000}>100k characters</option><option value={500000}>500k characters</option></select></label></div>
-            <div className="diagnostic-card"><span><strong>Diagnostics</strong><small>{runtimeStatus?.version ?? "Runtime version unavailable"}{runtimeStatus?.warning ? ` · ${runtimeStatus.warning}` : runtimeStatus?.compatible ? " · compatible" : ""}</small></span><button className="secondary-button" onClick={() => void exportDiagnosticBundle()}>Export JSON</button></div>
-          </section>}
-
-          {settingsSection === "agents" &&
-          <section className="settings-section">
-            <div className="settings-section-heading">
-              <div className="settings-icon"><UsersRound size={17} /></div>
-              <div><h3>Sub-agents</h3><p>Let the model delegate parallel work to direct child agents. Applies when a new thread starts.</p></div>
-            </div>
-            <div className={`agent-settings-card ${local.subagentsEnabled ? "enabled" : ""}`}>
-              <div className="agent-toggle-copy">
-                <strong>Allow sub-agent spawning</strong>
-                <small>{local.subagentsEnabled ? "The model may delegate when it decides that parallel work helps." : "No sub-agent tools are exposed to the model."}</small>
-              </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={local.subagentsEnabled}
-                className={`toggle-switch ${local.subagentsEnabled ? "on" : ""}`}
-                onClick={() => setLocal({ ...local, subagentsEnabled: !local.subagentsEnabled })}
-              >
-                <span />
-              </button>
-            </div>
-            <div className={`agent-limit-row ${local.subagentsEnabled ? "" : "disabled"}`}>
-              <div><strong>Maximum concurrent sub-agents</strong><small>Choose 1–24 active at once per thread, excluding the root agent.</small></div>
-              <div className="number-stepper" aria-label="Maximum concurrent sub-agents">
-                <button type="button" onClick={() => setLocal({ ...local, subagentMax: Math.max(1, local.subagentMax - 1) })} disabled={!local.subagentsEnabled || local.subagentMax <= 1}><Minus size={13} /></button>
-                <strong>{local.subagentMax}</strong>
-                <button type="button" onClick={() => setLocal({ ...local, subagentMax: Math.min(24, local.subagentMax + 1) })} disabled={!local.subagentsEnabled || local.subagentMax >= 24}><Plus size={13} /></button>
-              </div>
-            </div>
-            <div className="agent-safety-row">
-              <span><ShieldCheck size={13} /> Inherits permissions</span>
-              <span><Check size={13} /> Direct children only</span>
-              <span><Check size={13} /> Off by default</span>
-            </div>
-          </section>}
-
-          {settingsSection === "models" &&
-          <section className="settings-section">
-            <div className="settings-section-heading">
-              <div className="settings-icon"><KeyRound size={17} /></div>
-              <div><h3>Model provider</h3><p>Credentials stay in the OS credential store or Codex’s isolated login store.</p></div>
-            </div>
-            <div className="provider-cards">
-              <button className={`provider-card ${local.provider === "openai" ? "selected" : ""}`} onClick={() => setLocal({ ...local, provider: "openai", model: local.model.includes("/") ? "gpt-5.6-sol" : (local.model || "gpt-5.6-sol"), ultra: false })}>
-                <span className="provider-logo openai"><Sparkles size={17} /></span>
-                <span><strong>OpenAI</strong><small>Official ChatGPT subscription sign-in</small></span>
-                {local.provider === "openai" && <Check size={16} />}
-              </button>
-              <button className={`provider-card ${local.provider === "openrouter" ? "selected" : ""}`} onClick={() => setLocal({ ...local, provider: "openrouter", model: local.model.includes("/") ? local.model : "", ultra: false })}>
-                <span className="provider-logo openrouter"><RotateCcw size={17} /></span>
-                <span><strong>OpenRouter</strong><small>Responses-compatible model routing</small></span>
-                {local.provider === "openrouter" && <Check size={16} />}
-              </button>
-            </div>
-
-            {local.provider === "openai" ? (
-              <div className="credential-panel">
-                <div>
-                  <strong>{account?.type === "chatgpt" ? account.email || "ChatGPT account" : "ChatGPT subscription"}</strong>
-                  <small>{account?.type === "chatgpt" ? `${account.planType ?? "ChatGPT"} plan connected` : runtimeStatus?.available ? `Official browser sign-in · ${runtimeStatus.source} detected` : "Codex CLI or ChatGPT for macOS required"}</small>
-                </div>
-                {account?.type === "chatgpt" ? (
-                  <button className="secondary-button" onClick={() => void signOut()} disabled={busy}>Sign out</button>
-                ) : (
-                  <button className="secondary-button" onClick={() => void signIn()} disabled={busy}>
-                    {busy ? <LoaderCircle className="spin" size={14} /> : !runtimeStatus?.available ? <Download size={14} /> : null} {runtimeStatus?.available ? "Sign in" : "Set up Codex"}
-                  </button>
-                )}
-              </div>
-            ) : (
-              <div className="credential-panel stacked">
-                <div className="credential-status">
-                  <div><strong>OpenRouter API key</strong><small>{openRouterReady ? "Stored securely on this device" : "No key stored"}</small></div>
-                  {openRouterReady && <span className="connected-badge"><Check size={12} /> Connected</span>}
-                </div>
-                <div className="key-input-row">
-                  <input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="sk-or-v1-…" />
-                  <button className="secondary-button" onClick={() => void storeKey()} disabled={!apiKey.trim() || busy}>Save key</button>
-                </div>
-              </div>
-            )}
-
-            <label className="field-label">
-              <span>Model</span>
-              <input
-                value={local.model}
-                onChange={(event) => setLocal({ ...local, model: event.target.value })}
-                readOnly={local.provider === "openai"}
-                placeholder={local.provider === "openrouter" ? "e.g. anthropic/claude-sonnet-4" : "Select Sol, Terra, or Luna below the composer"}
-              />
-              <small>{local.provider === "openrouter" ? "Use the searchable picker beneath the composer, or enter any valid provider/model slug here." : "Use the animated selector beneath the composer. Availability follows the signed-in ChatGPT account."}</small>
-            </label>
-          </section>}
-          </div>
-        </div>
-
-        <div className="modal-footer">
-          <button className="secondary-button" onClick={onClose}>Cancel</button>
-          <button className="primary-button" onClick={() => onSave({ ...local, subagentMax: Math.min(24, Math.max(1, local.subagentMax)) })}>Save settings</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function UpdateSettings({ appUpdater }: { appUpdater: AppUpdater }) {
-  const progress = updateProgress(appUpdater.downloadedBytes, appUpdater.totalBytes);
-  const busy = ["checking", "downloading", "installing", "restarting"].includes(appUpdater.phase);
-  const detail = appUpdater.phase === "checking" ? "Checking GitHub Releases…"
-    : appUpdater.phase === "current" ? "You have the newest available version."
-      : appUpdater.phase === "available" ? `Version ${appUpdater.availableVersion} is available.`
-        : appUpdater.phase === "downloading" ? (progress === null ? "Downloading the signed update…" : `Downloading the signed update… ${progress}%`)
-          : appUpdater.phase === "installing" ? "Verifying and installing the update…"
-            : appUpdater.phase === "restarting" ? "Update installed. Restarting OpenKiwi…"
-              : appUpdater.phase === "error" ? appUpdater.error || "The update could not be completed."
-                : "Check the public OpenKiwi repository for a newer signed release.";
-
-  return <section className="settings-section update-settings-section">
-    <div className="settings-section-heading">
-      <div className="settings-icon"><Download size={17} /></div>
-      <div><h3>OpenKiwi updates</h3><p>Updates are cryptographically verified before installation and are applied after OpenKiwi restarts.</p></div>
-    </div>
-    <div className={`update-card ${appUpdater.phase}`}>
-      <div className="update-version-row">
-        <span><small>Installed</small><strong>OpenKiwi {appUpdater.currentVersion}</strong></span>
-        {appUpdater.availableVersion && <span className="update-version-available"><small>Available</small><strong>{appUpdater.availableVersion}</strong></span>}
-      </div>
-      <div className="update-status-row">
-        {busy && <LoaderCircle className="spin" size={15} />}
-        {!busy && appUpdater.phase === "current" && <Check size={15} />}
-        {!busy && appUpdater.phase === "available" && <Download size={15} />}
-        <span>{detail}</span>
-      </div>
-      {(appUpdater.phase === "downloading" || appUpdater.phase === "installing") && (
-        <div className={`update-progress ${progress === null ? "indeterminate" : ""}`} role="progressbar" aria-label="Update download progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress ?? undefined}>
-          <span style={progress === null ? undefined : { width: `${progress}%` }} />
-        </div>
-      )}
-      {appUpdater.notes && <div className="update-notes"><strong>What’s new</strong><p>{appUpdater.notes}</p>{appUpdater.publishedAt && <small>{new Date(appUpdater.publishedAt).toLocaleDateString()}</small>}</div>}
-      <div className="update-actions">
-        <button className="secondary-button" onClick={() => void openUrl(RELEASE_NOTES_URL)}><ExternalLink size={13} /> View release notes</button>
-        {appUpdater.phase === "available" ? (
-          <button className="primary-button" onClick={() => void appUpdater.downloadAndRestart()}><Download size={13} /> Download, install, and restart</button>
-        ) : (
-          <button className="secondary-button" disabled={busy} onClick={() => void appUpdater.checkForUpdates()}>{appUpdater.phase === "checking" ? <LoaderCircle className="spin" size={13} /> : <RotateCcw size={13} />} {appUpdater.phase === "error" ? "Try again" : "Check for updates"}</button>
-        )}
-      </div>
-    </div>
-    <div className="update-trust-row"><ShieldCheck size={14} /><span><strong>Verified release channel</strong><small>Manifest and packages come from github.com/m17h/OpenKiwi and must match OpenKiwi’s embedded updater key.</small></span></div>
-  </section>;
 }

@@ -19,6 +19,7 @@ import {
   RefreshCw,
   RotateCcw,
   SearchCode,
+  Shrink,
   ShieldCheck,
   TerminalSquare,
   UsersRound,
@@ -121,6 +122,7 @@ export function StudioDock(props: {
   onAddAttachment: () => void;
   onRemoveAttachment: (path: string) => void;
   onRefreshUsage: () => void;
+  onCompact: () => void;
   onRefreshTools: () => void;
   onGitAction: (action: "status" | "diff" | "stage" | "revert" | "commit" | "comments" | "ci" | "pr") => void;
   onGitCommitMessage: (value: string) => void;
@@ -183,7 +185,10 @@ export function StudioDock(props: {
 
         {props.tab === "usage" && <>
           <PanelHeader icon={Gauge} title="Usage & audit" subtitle="Context, tokens, and visible request fields" onClose={props.onClose} />
-          <div className="studio-actions"><button onClick={props.onRefreshUsage}><RefreshCw size={13} /> Refresh</button></div>
+          <div className="studio-actions"><button onClick={props.onRefreshUsage}><RefreshCw size={13} /> Refresh</button><button onClick={props.onCompact} disabled={!props.activeThread} title="Summarize older turns to free context in this thread"><Shrink size={13} /> Compact context</button></div>
+          {props.usage?.contextWindow && props.usage.totalTokens / props.usage.contextWindow > 0.7 && (
+            <div className="history-warning"><Gauge size={13} /> Context is getting full. Compacting summarizes older turns so the thread can keep going.</div>
+          )}
           <div className="usage-hero"><span>Context used</span><strong>{props.usage?.totalTokens.toLocaleString() ?? "—"}</strong><small>{props.usage?.contextWindow ? `of ${props.usage.contextWindow.toLocaleString()} tokens` : "Current thread"}</small><i style={{ width: `${Math.min(100, ((props.usage?.totalTokens ?? 0) / (props.usage?.contextWindow || 1)) * 100)}%` }} /></div>
           <div className="metric-grid three"><div><strong>{props.usage?.inputTokens.toLocaleString() ?? "—"}</strong><span>Input</span></div><div><strong>{props.usage?.outputTokens.toLocaleString() ?? "—"}</strong><span>Output</span></div><div><strong>{props.usage?.reasoningOutputTokens.toLocaleString() ?? "—"}</strong><span>Reasoning</span></div></div>
           <div className="rate-card"><span>Account limits</span><strong>{props.rateSummary || "Sign in to view live limits"}</strong></div>

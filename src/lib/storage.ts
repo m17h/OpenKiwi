@@ -11,6 +11,7 @@ export const DURABLE_STORAGE_KEYS = [
   "kiwi.projectActions",
   "kiwi.scheduledTasks",
   "kiwi.pinnedThreads",
+  "kiwi.archivedThreads",
   "kiwi.skillsFolder",
   "kiwi.skillAliases",
   "kiwi.disabledSkills",

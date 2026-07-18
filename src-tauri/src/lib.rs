@@ -1300,6 +1300,30 @@ async fn codex_rpc(
         "fuzzyFileSearch/sessionUpdate",
         "fuzzyFileSearch/sessionStop",
     ];
+    // Methods that are safe to transparently re-send after the runtime is
+    // respawned. Everything else (turn/start, command/exec, config writes, …)
+    // may already have taken effect before the connection died, so an
+    // automatic retry could run the action twice.
+    const RETRYABLE_METHODS: &[&str] = &[
+        "account/read",
+        "account/rateLimits/read",
+        "account/usage/read",
+        "model/list",
+        "thread/list",
+        "thread/read",
+        "thread/search",
+        "skills/list",
+        "mcpServerStatus/list",
+        "config/read",
+        "modelProvider/capabilities/read",
+        "permissionProfile/list",
+        "experimentalFeature/list",
+        "gitDiffToRemote",
+        "fs/readFile",
+        "fs/readDirectory",
+        "fs/getMetadata",
+        "fuzzyFileSearch",
+    ];
     if !ALLOWED_METHODS.contains(&method.as_str()) {
         return Err(format!(
             "OpenKiwi's desktop bridge does not allow the RPC method `{method}`"
@@ -1320,7 +1344,13 @@ async fn codex_rpc(
             let recovered = ensure_server(&app, &state).await.map_err(|restart_error| {
                 format!("{error}. OpenKiwi also could not restart the runtime: {restart_error}")
             })?;
-            recovered.request(&method, params).await
+            if RETRYABLE_METHODS.contains(&method.as_str()) {
+                recovered.request(&method, params).await
+            } else {
+                Err(format!(
+                    "{error}. The runtime was restarted; retry the action if it did not complete."
+                ))
+            }
         }
         Err(error) => Err(error),
     }

@@ -12,6 +12,7 @@ export interface Project {
   path: string;
   pinned?: boolean;
   isChat?: boolean;
+  worktree?: { source: string; branch: string };
 }
 
 export interface Thread {
@@ -103,6 +104,19 @@ export interface ProjectAction {
   icon?: string;
 }
 
+export interface ScheduleRunSettings {
+  provider: Provider;
+  model: string;
+  permission: PermissionMode;
+  systemPrompt: string;
+  projectInstructionsEnabled: boolean;
+  subagentsEnabled: boolean;
+  subagentMax: number;
+  reasoningEffort: ReasoningEffort;
+  ultra: boolean;
+  serviceTier: string | null;
+}
+
 export interface ScheduledTask {
   id: string;
   name: string;
@@ -113,6 +127,14 @@ export interface ScheduledTask {
   nextRunAt: number;
   lastRunAt?: number;
   lastThreadId?: string;
+  run?: ScheduleRunSettings;
+}
+
+export interface ArchivedThread {
+  id: string;
+  label: string;
+  path: string;
+  archivedAt: number;
 }
 
 export interface AppSettings {
