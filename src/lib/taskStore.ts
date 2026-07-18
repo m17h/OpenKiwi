@@ -25,7 +25,7 @@ interface TaskStoreState {
   statuses: Record<string, TaskStatus>;
   setActiveThread: (threadId: string | null) => void;
   ensureTask: (threadId: string, workspacePath?: string) => void;
-  hydrateTask: (threadId: string, messages: ChatMessage[], workspacePath?: string) => void;
+  hydrateTask: (threadId: string, messages: ChatMessage[], activities: Activity[], workspacePath?: string) => void;
   appendUserMessage: (threadId: string, message: ChatMessage) => void;
   queueAssistantDelta: (threadId: string, itemId: string, delta: string) => void;
   flushDeltas: () => void;
@@ -43,6 +43,15 @@ interface TaskStoreState {
 
 const pendingDeltas = new Map<string, Map<string, string>>();
 let deltaFrame: number | ReturnType<typeof setTimeout> | null = null;
+let timelineSequence = 0;
+
+function withTimelineOrder<T extends { timelineOrder?: number }>(entry: T): T {
+  if (entry.timelineOrder !== undefined) {
+    timelineSequence = Math.max(timelineSequence, entry.timelineOrder);
+    return entry;
+  }
+  return { ...entry, timelineOrder: ++timelineSequence };
+}
 
 function emptyTask(threadId: string, workspacePath?: string): ThreadTaskState {
   return {
@@ -96,16 +105,23 @@ export const useTaskStore = create<TaskStoreState>((set, get) => ({
       statuses: { ...state.statuses, [threadId]: "idle" },
     };
   }),
-  hydrateTask: (threadId, messages, workspacePath) => set((state) => ({
+  hydrateTask: (threadId, messages, activities, workspacePath) => set((state) => ({
     tasks: {
       ...state.tasks,
-      [threadId]: { ...(state.tasks[threadId] ?? emptyTask(threadId, workspacePath)), workspacePath, messages, unread: false, updatedAt: Date.now() },
+      [threadId]: {
+        ...(state.tasks[threadId] ?? emptyTask(threadId, workspacePath)),
+        workspacePath,
+        messages: messages.map(withTimelineOrder),
+        activities: activities.map(withTimelineOrder),
+        unread: false,
+        updatedAt: Date.now(),
+      },
     },
     statuses: { ...state.statuses, [threadId]: state.statuses[threadId] ?? "idle" },
   })),
   appendUserMessage: (threadId, message) => set((state) => {
     const task = state.tasks[threadId] ?? emptyTask(threadId);
-    return { tasks: { ...state.tasks, [threadId]: { ...task, messages: [...task.messages, message], updatedAt: Date.now() } } };
+    return { tasks: { ...state.tasks, [threadId]: { ...task, messages: [...task.messages, withTimelineOrder(message)], updatedAt: Date.now() } } };
   }),
   queueAssistantDelta: (threadId, itemId, delta) => {
     const byItem = pendingDeltas.get(threadId) ?? new Map<string, string>();
@@ -125,7 +141,7 @@ export const useTaskStore = create<TaskStoreState>((set, get) => ({
         for (const [itemId, delta] of itemDeltas) {
           const index = messages.findIndex((message) => message.id === itemId);
           messages = index < 0
-            ? [...messages, { id: itemId, role: "assistant", text: delta, streaming: true }]
+            ? [...messages, withTimelineOrder<ChatMessage>({ id: itemId, role: "assistant", text: delta, streaming: true })]
             : messages.map((message, messageIndex) => messageIndex === index ? { ...message, text: `${message.text}${delta}`, streaming: true } : message);
         }
         tasks[threadId] = { ...task, messages, unread: state.activeThreadId !== threadId, updatedAt: Date.now() };
@@ -136,13 +152,17 @@ export const useTaskStore = create<TaskStoreState>((set, get) => ({
   completeMessage: (threadId, message) => set((state) => {
     const task = state.tasks[threadId] ?? emptyTask(threadId);
     const exists = task.messages.some((entry) => entry.id === message.id);
-    const messages = exists ? task.messages.map((entry) => entry.id === message.id ? { ...message, streaming: false } : entry) : [...task.messages, { ...message, streaming: false }];
+    const messages = exists
+      ? task.messages.map((entry) => entry.id === message.id ? { ...message, streaming: false, timelineOrder: entry.timelineOrder } : entry)
+      : [...task.messages, withTimelineOrder({ ...message, streaming: false })];
     return { tasks: { ...state.tasks, [threadId]: { ...task, messages, unread: state.activeThreadId !== threadId, updatedAt: Date.now() } } };
   }),
   upsertActivity: (threadId, activity) => set((state) => {
     const task = state.tasks[threadId] ?? emptyTask(threadId);
     const exists = task.activities.some((entry) => entry.id === activity.id);
-    const activities = exists ? task.activities.map((entry) => entry.id === activity.id ? activity : entry) : [...task.activities, activity];
+    const activities = exists
+      ? task.activities.map((entry) => entry.id === activity.id ? { ...activity, timelineOrder: entry.timelineOrder } : entry)
+      : [...task.activities, withTimelineOrder(activity)];
     return { tasks: { ...state.tasks, [threadId]: { ...task, activities, unread: state.activeThreadId !== threadId, updatedAt: Date.now() } } };
   }),
   setTaskStatus: (threadId, status, error) => set((state) => {
@@ -188,5 +208,6 @@ export const useTaskStore = create<TaskStoreState>((set, get) => ({
 
 export function resetTaskStore(): void {
   pendingDeltas.clear();
+  timelineSequence = 0;
   useTaskStore.setState({ activeThreadId: null, tasks: {}, statuses: {} });
 }

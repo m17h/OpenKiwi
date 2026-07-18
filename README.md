@@ -169,7 +169,7 @@ npm run release:publish
 
 ## Verification and release notes
 
-`npm run verify` runs TypeScript, Rust, unit/integration component tests, and the production web build. `npm run desktop:build` produces a local platform installer/application without updater artifacts. `npm run release:build` requires publisher-owned signing/notarization credentials and generates the signed update payload. OpenKiwi does not embed those credentials or bundle Codex.
+`npm run verify` runs TypeScript, Rust, unit/integration component tests, and the production web build. `npm run desktop:build` produces only the local `.app` without updater artifacts; it never invokes Tauri's DMG bundler. `npm run release:build` requires publisher-owned signing/notarization credentials, builds the signed update payload, and creates the DMG exclusively through the standalone `create-dmg` command. OpenKiwi does not embed those credentials or bundle Codex.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the component and state model.
 

@@ -35,4 +35,16 @@ describe("task store", () => {
     store.setTaskStatus("thread-b", "completed");
     expect(useTaskStore.getState().statuses).toEqual({ "thread-a": "running", "thread-b": "completed" });
   });
+
+  it("assigns chronology once and preserves it when activity completes", () => {
+    const store = useTaskStore.getState();
+    store.appendUserMessage("thread-a", { id: "user", role: "user", text: "Check it" });
+    store.upsertActivity("thread-a", { id: "command", kind: "command", title: "git status", status: "inProgress" });
+    store.upsertActivity("thread-a", { id: "command", kind: "command", title: "git status", detail: "clean", status: "completed" });
+    store.completeMessage("thread-a", { id: "assistant", role: "assistant", text: "Done" });
+
+    const task = useTaskStore.getState().tasks["thread-a"];
+    expect(task.messages[0].timelineOrder).toBeLessThan(task.activities[0].timelineOrder!);
+    expect(task.activities[0].timelineOrder).toBeLessThan(task.messages[1].timelineOrder!);
+  });
 });

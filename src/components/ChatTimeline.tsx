@@ -1,5 +1,5 @@
 import { Children, isValidElement, memo, useMemo, useState, type ReactNode } from "react";
-import { Check, Clipboard, FileCode2, LoaderCircle, Sparkles, TerminalSquare, UsersRound } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Clipboard, FileCode2, LoaderCircle, Sparkles, TerminalSquare, UsersRound } from "lucide-react";
 import Markdown from "react-markdown";
 import { Virtuoso } from "react-virtuoso";
 import remarkGfm from "remark-gfm";
@@ -9,6 +9,18 @@ type TimelineEntry =
   | { kind: "message"; value: ChatMessage }
   | { kind: "activity"; value: Activity }
   | { kind: "thinking"; label: string };
+
+export function orderedTimelineEntries(messages: ChatMessage[], activities: Activity[]): TimelineEntry[] {
+  const entries: TimelineEntry[] = [
+    ...messages.map((value): TimelineEntry => ({ kind: "message", value })),
+    ...activities.map((value): TimelineEntry => ({ kind: "activity", value })),
+  ];
+  return entries.sort((left, right) => {
+    const leftOrder = left.kind === "thinking" ? Number.MAX_SAFE_INTEGER : left.value.timelineOrder ?? Number.MAX_SAFE_INTEGER;
+    const rightOrder = right.kind === "thinking" ? Number.MAX_SAFE_INTEGER : right.value.timelineOrder ?? Number.MAX_SAFE_INTEGER;
+    return leftOrder - rightOrder;
+  });
+}
 
 function textFromCodeNode(node: ReactNode): string {
   const child = Children.toArray(node)[0];
@@ -54,7 +66,8 @@ const MessageRow = memo(function MessageRow({ message }: { message: ChatMessage 
   );
 });
 
-const ActivityRow = memo(function ActivityRow({ activity }: { activity: Activity }) {
+export const ActivityRow = memo(function ActivityRow({ activity }: { activity: Activity }) {
+  const [expanded, setExpanded] = useState(false);
   const Icon = activity.kind === "command"
     ? TerminalSquare
     : activity.kind === "file"
@@ -63,16 +76,27 @@ const ActivityRow = memo(function ActivityRow({ activity }: { activity: Activity
         ? UsersRound
         : Sparkles;
   return (
-    <div className="activity-row">
+    <div className={`activity-row ${activity.kind === "command" ? "command-activity" : ""} ${expanded ? "expanded" : "collapsed"}`}>
       <div className={`activity-icon ${activity.kind}`}><Icon size={14} /></div>
       <div className="activity-copy">
-        <span>{activity.title}</span>
-        {activity.detail && <pre>{activity.detail.slice(-1200)}</pre>}
+        {activity.kind === "command" && activity.detail ? (
+          <button className="activity-toggle" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
+            {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+            <span>{activity.title}</span>
+          </button>
+        ) : <span>{activity.title}</span>}
+        {activity.detail && (activity.kind !== "command" || expanded) && <pre>{activity.detail.slice(-1200)}</pre>}
       </div>
       {activity.status && <small>{activity.status}</small>}
     </div>
   );
 });
+
+function TimelineFooter() {
+  return <div className="timeline-bottom-space" aria-hidden="true" />;
+}
+
+const VIRTUOSO_COMPONENTS = { Footer: TimelineFooter };
 
 export function ChatTimeline({
   messages,
@@ -86,10 +110,7 @@ export function ChatTimeline({
   thinkingLabel: string;
 }) {
   const entries = useMemo<TimelineEntry[]>(() => {
-    const next: TimelineEntry[] = [
-      ...messages.map((value): TimelineEntry => ({ kind: "message", value })),
-      ...activities.map((value): TimelineEntry => ({ kind: "activity", value })),
-    ];
+    const next = orderedTimelineEntries(messages, activities);
     if (running && !messages.some((message) => message.streaming)) {
       next.push({ kind: "thinking", label: thinkingLabel });
     }
@@ -100,12 +121,22 @@ export function ChatTimeline({
     <Virtuoso
       className="timeline virtual-timeline"
       data={entries}
+      components={VIRTUOSO_COMPONENTS}
       followOutput={(atBottom) => atBottom ? "smooth" : false}
       increaseViewportBy={{ top: 500, bottom: 800 }}
+      computeItemKey={(index, entry) => entry.kind === "thinking" ? `thinking-${index}` : `${entry.kind}-${entry.value.id}`}
       itemContent={(_, entry) => {
-        if (entry.kind === "message") return <MessageRow message={entry.value} />;
-        if (entry.kind === "activity") return <ActivityRow activity={entry.value} />;
-        return <div className="thinking-row"><LoaderCircle className="spin" size={15} /> {entry.label}</div>;
+        if (entry.kind === "message") {
+          return <div className="timeline-entry"><MessageRow message={entry.value} /></div>;
+        }
+        if (entry.kind === "activity") {
+          return <div className="timeline-entry"><ActivityRow activity={entry.value} /></div>;
+        }
+        return (
+          <div className="timeline-entry">
+            <div className="thinking-row"><LoaderCircle className="spin" size={15} /> {entry.label}</div>
+          </div>
+        );
       }}
     />
   );

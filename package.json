@@ -1,7 +1,7 @@
 {
   "name": "openkiwi",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.4.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "desktop": "tauri dev",
-    "desktop:build": "tauri build --config src-tauri/tauri.local.conf.json",
+    "desktop:build": "tauri build --bundles app --config src-tauri/tauri.local.conf.json",
     "version:bump": "node scripts/bump-version.mjs",
     "release:build": "node scripts/build-release.mjs",
     "release:prepare": "node scripts/prepare-release.mjs",

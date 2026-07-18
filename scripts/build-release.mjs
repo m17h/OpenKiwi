@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -40,7 +40,10 @@ const releaseEnv = {
   TAURI_SIGNING_PRIVATE_KEY_PASSWORD: signingPassword,
 };
 rmSync(resolve(root, "src-tauri/target/release/bundle"), { recursive: true, force: true });
-const result = spawnSync(tauri, ["build", "--bundles", "app,dmg"], {
+// Tauri builds and notarizes the app/updater payload only. OpenKiwi's DMG is
+// always created separately with the dedicated create-dmg tool so its layout
+// and signing path never depend on Tauri's built-in DMG bundler.
+const result = spawnSync(tauri, ["build", "--bundles", "app"], {
   cwd: root,
   env: releaseEnv,
   stdio: "inherit",
@@ -49,7 +52,27 @@ if (result.status !== 0) process.exit(result.status ?? 1);
 
 if (process.platform === "darwin") {
   const tauriArch = process.arch === "arm64" ? "aarch64" : "x86_64";
+  const appBundle = resolve(root, "src-tauri/target/release/bundle/macos/OpenKiwi.app");
+  if (!existsSync(appBundle)) throw new Error(`Built app not found at ${appBundle}`);
+
+  const dmgDirectory = resolve(root, "src-tauri/target/release/bundle/dmg");
+  rmSync(dmgDirectory, { recursive: true, force: true });
+  mkdirSync(dmgDirectory, { recursive: true });
+  const createDmg = spawnSync("create-dmg", [
+    "--overwrite",
+    `--identity=${appleSigningIdentity}`,
+    "--dmg-title=OpenKiwi",
+    appBundle,
+    dmgDirectory,
+  ], { cwd: root, stdio: "inherit" });
+  if (createDmg.error) throw new Error(`Could not run create-dmg: ${createDmg.error.message}`);
+  if (createDmg.status !== 0) process.exit(createDmg.status ?? 1);
+
+  const createdDmgs = readdirSync(dmgDirectory).filter((entry) => entry.endsWith(".dmg"));
+  if (createdDmgs.length !== 1) throw new Error(`create-dmg produced ${createdDmgs.length} DMGs; expected exactly one.`);
   const dmg = resolve(root, `src-tauri/target/release/bundle/dmg/OpenKiwi_${version}_${tauriArch}.dmg`);
+  const createdDmg = resolve(dmgDirectory, createdDmgs[0]);
+  if (createdDmg !== dmg) renameSync(createdDmg, dmg);
   if (!existsSync(dmg)) throw new Error(`Built DMG not found at ${dmg}`);
 
   const stapled = spawnSync("xcrun", ["stapler", "validate", dmg], { stdio: "ignore" });

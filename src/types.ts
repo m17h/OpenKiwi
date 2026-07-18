@@ -55,6 +55,7 @@ export interface ChatMessage {
   role: "user" | "assistant";
   text: string;
   streaming?: boolean;
+  timelineOrder?: number;
 }
 
 export interface Activity {
@@ -63,6 +64,7 @@ export interface Activity {
   title: string;
   detail?: string;
   status?: string;
+  timelineOrder?: number;
 }
 
 export interface Account {

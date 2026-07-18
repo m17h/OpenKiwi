@@ -149,7 +149,7 @@ button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px
 .empty-state-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 7px; margin-top: 19px; }
 .empty-state-actions button { min-height: 33px; display: flex; align-items: center; gap: 6px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; color: #aab0aa; background: rgba(255,255,255,.022); font-size: 10px; cursor: pointer; }
 .empty-state-actions button:hover { color: var(--text); border-color: color-mix(in srgb, var(--green) 24%, var(--line)); background: var(--green-soft); }
-.timeline { width: min(820px, calc(100% - 48px)); margin: 0 auto; padding: 48px 0 32px; }
+.timeline { width: 100%; margin: 0; padding: 0; }
 .message { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 13px; margin-bottom: 28px; }
 .message.user { grid-template-columns: minmax(0, 1fr); margin-left: 12%; }
 .message.user .message-avatar { display: none; }
@@ -158,8 +158,10 @@ button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px
 .message.user .message-avatar { background: #23272b; color: var(--muted); }
 .message-body { min-width: 0; color: #d9dcd8; font-size: 13.5px; line-height: 1.68; }
 .message-text { white-space: pre-wrap; overflow-wrap: anywhere; }
-.virtual-timeline { height: 100%; padding: 0; }
-.virtual-timeline [data-testid="virtuoso-item-list"] { padding: 48px 0 32px; }
+.virtual-timeline { height: 100%; direction: rtl; }
+.virtual-timeline [data-testid="virtuoso-item-list"] { padding: 48px 0 12px; direction: ltr; }
+.timeline-entry { width: min(820px, calc(100% - 48px)); margin-inline: auto; }
+.timeline-bottom-space { height: 76px; direction: ltr; }
 .virtual-timeline .message, .virtual-timeline .activity-row, .virtual-timeline .thinking-row { margin-left: 0; margin-right: 0; }
 .virtual-timeline .activity-row { margin: 0 0 7px 42px; }
 .virtual-timeline .thinking-row { margin: 4px 0 24px 42px; }
@@ -185,6 +187,10 @@ button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px
 .activity-icon.agent { color: #83c8f5; background: rgba(131,200,245,.1); }
 .activity-copy { min-width: 0; display: flex; flex-direction: column; gap: 7px; }
 .activity-copy > span { font: 10.5px/1.5 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; color: #aeb3b7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.activity-toggle { width: 100%; min-width: 0; display: flex; align-items: center; gap: 4px; padding: 0; border: 0; color: #aeb3b7; background: transparent; text-align: left; cursor: pointer; }
+.activity-toggle span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 10.5px/1.5 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; }
+.activity-toggle svg { flex: 0 0 auto; color: var(--muted-2); transition: color .16s ease; }
+.activity-toggle:hover, .activity-toggle:hover svg { color: var(--text); }
 .activity-copy pre { max-height: 140px; overflow: auto; margin: 0; padding: 8px; border-radius: 5px; color: #858c92; background: rgba(0,0,0,.2); font: 9.5px/1.45 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; white-space: pre-wrap; }
 .activity-row > small { color: var(--muted-2); font-size: 9px; }
 .thinking-row { display: flex; align-items: center; gap: 8px; margin-left: 42px; color: var(--muted); font-size: 11px; }
@@ -452,7 +458,7 @@ button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px
   .sidebar { flex-basis: 230px; width: 230px; }
   .sidebar-section, .sidebar-footer { min-width: 230px; }
   .prompt-button { display: none; }
-  .timeline { width: calc(100% - 32px); }
+  .timeline-entry { width: calc(100% - 32px); }
 }
 
 /* OpenRouter model rail */

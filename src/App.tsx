@@ -54,6 +54,7 @@ import { DEFAULT_OPENAI_MODEL, DEFAULT_PROMPT_PROFILES, DEFAULT_SETTINGS, THEMES
 import { commandSandbox, threadStartParams, turnStartParams } from "./lib/turnConfig";
 import { threadSearchParams, threadsForWorkspace, type ThreadSearchResponse } from "./lib/threadSearch";
 import { optimisticStartedThread, upsertThread } from "./lib/threadList";
+import { timelineFromTurns } from "./lib/threadTimeline";
 import { type ReasoningEffort, ModelPowerControl, type RuntimeModel } from "./components/ModelPowerControl";
 import { OpenRouterModelControl, type OpenRouterModel } from "./components/OpenRouterModelControl";
 import { ApprovalCenter } from "./components/ApprovalCenter";
@@ -82,8 +83,6 @@ import type {
   PromptProfile,
   ScheduledTask,
   Thread,
-  ThreadItem,
-  Turn,
   WorkspaceMode,
 } from "./types";
 import { useTaskStore } from "./lib/taskStore";
@@ -130,27 +129,6 @@ function basename(path: string): string {
 function normalizedProjectPath(path: string): string {
   const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
   return normalized || "/";
-}
-
-function textFromUserContent(content: ThreadItem["content"]): string {
-  return (content ?? [])
-    .filter((item) => item.type === "text")
-    .map((item) => item.text ?? "")
-    .join("\n");
-}
-
-function messagesFromTurns(turns: Turn[] = []): ChatMessage[] {
-  return turns.flatMap((turn) =>
-    turn.items.flatMap((item): ChatMessage[] => {
-      if (item.type === "userMessage") {
-        return [{ id: item.id ?? crypto.randomUUID(), role: "user", text: textFromUserContent(item.content) }];
-      }
-      if (item.type === "agentMessage" || item.type === "plan") {
-        return [{ id: item.id ?? crypto.randomUUID(), role: "assistant", text: item.text ?? "" }];
-      }
-      return [];
-    }),
-  );
 }
 
 function permissionLabel(mode: PermissionMode): string {
@@ -664,7 +642,8 @@ export default function App() {
       });
       bindThreadToProject(result.thread.id, activeWorkspace.path);
       setActiveThread(result.thread);
-      useTaskStore.getState().hydrateTask(result.thread.id, messagesFromTurns(result.thread.turns), activeWorkspace.path);
+      const history = timelineFromTurns(result.thread.turns);
+      useTaskStore.getState().hydrateTask(result.thread.id, history.messages, history.activities, activeWorkspace.path);
       useTaskStore.getState().setActiveThread(result.thread.id);
       setStatus("Ready");
     } catch (reason) {
@@ -916,7 +895,8 @@ export default function App() {
     try {
       const result = await rpc<{ thread: Thread }>("thread/read", { threadId, includeTurns: true });
       setActiveThread(result.thread);
-      useTaskStore.getState().hydrateTask(result.thread.id, messagesFromTurns(result.thread.turns), result.thread.cwd);
+      const history = timelineFromTurns(result.thread.turns);
+      useTaskStore.getState().hydrateTask(result.thread.id, history.messages, history.activities, result.thread.cwd);
       useTaskStore.getState().setActiveThread(result.thread.id);
       setStudioOpen(false);
     } catch (reason) { setError(friendlyError(reason)); }
@@ -958,7 +938,8 @@ export default function App() {
       });
       if (activeWorkspace) bindThreadToProject(result.thread.id, activeWorkspace.path);
       setActiveThread(result.thread);
-      useTaskStore.getState().hydrateTask(result.thread.id, messagesFromTurns(result.thread.turns), activeWorkspace?.path);
+      const history = timelineFromTurns(result.thread.turns);
+      useTaskStore.getState().hydrateTask(result.thread.id, history.messages, history.activities, activeWorkspace?.path);
       useTaskStore.getState().setActiveThread(result.thread.id);
       setStudioOpen(false);
       void loadThreads(activeWorkspace);
@@ -970,7 +951,8 @@ export default function App() {
     try {
       const result = await rpc<{ thread: Thread }>("thread/rollback", { threadId: activeThread.id, numTurns: 1 });
       setActiveThread(result.thread);
-      useTaskStore.getState().hydrateTask(result.thread.id, messagesFromTurns(result.thread.turns), activeWorkspace?.path);
+      const history = timelineFromTurns(result.thread.turns);
+      useTaskStore.getState().hydrateTask(result.thread.id, history.messages, history.activities, activeWorkspace?.path);
     } catch (reason) { setError(friendlyError(reason)); }
   };
 
