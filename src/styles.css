@@ -71,7 +71,36 @@ button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px
 .app-shell[data-theme="daylight"] .activity-copy > span, .app-shell[data-theme="daylight"] .activity-toggle span { color: #4c544c; }
 .app-shell[data-theme="daylight"] .activity-copy pre { color: #5a635a; background: rgba(0,0,0,.05); }
 .app-shell[data-theme="daylight"] .reasoning-text { color: #5a635a; }
-.app-shell[data-theme="daylight"] .model-picker-trigger { background: #fbfcf9; }
+/* Neon accents vanish on white — swap in darker variants for Daylight */
+.app-shell[data-theme="daylight"] .model-power-control { --model-accent: #b06b1e; }
+.app-shell[data-theme="daylight"] .model-power-control.terra { --model-accent: #3e8e22; }
+.app-shell[data-theme="daylight"] .model-power-control.luna { --model-accent: #1668a8; }
+.app-shell[data-theme="daylight"] .model-power-control.ultra { --model-accent: #7a56be; }
+.app-shell[data-theme="daylight"] .model-menu-option.sol { --option-accent: #b06b1e; }
+.app-shell[data-theme="daylight"] .model-menu-option.terra { --option-accent: #3e8e22; }
+.app-shell[data-theme="daylight"] .model-menu-option.luna { --option-accent: #1668a8; }
+.app-shell[data-theme="daylight"] .openrouter-control { --router-accent: #7a56be; }
+.app-shell[data-theme="daylight"] .model-orb, .app-shell[data-theme="daylight"] .menu-model-orb, .app-shell[data-theme="daylight"] .openrouter-logo { color: #ffffff; }
+.app-shell[data-theme="daylight"] .provider-logo { background: #eceee8; }
+.app-shell[data-theme="daylight"] .provider-logo.openrouter { color: #7a56be; }
+.app-shell[data-theme="daylight"] .provider-card { color: #4c544c; }
+.app-shell[data-theme="daylight"] .provider-dot.openrouter { background: #7a56be; box-shadow: 0 0 0 3px rgba(122,86,190,.12); }
+.app-shell[data-theme="daylight"] .file-preview { background: #f7f8f5; }
+.app-shell[data-theme="daylight"] .file-preview pre { color: #454d43; }
+.app-shell[data-theme="daylight"] .file-search { background: #ffffff; }
+.app-shell[data-theme="daylight"] .model-picker-trigger { background: linear-gradient(135deg, color-mix(in srgb, var(--model-accent) 8%, #ffffff), #fbfcf9); }
+.app-shell[data-theme="daylight"] .model-picker-trigger:hover:not(:disabled), .app-shell[data-theme="daylight"] .menu-open .model-picker-trigger { background: linear-gradient(135deg, color-mix(in srgb, var(--model-accent) 13%, #ffffff), #f6f7f2); box-shadow: inset 0 1px rgba(255,255,255,.6), 0 0 20px color-mix(in srgb, var(--model-accent) 10%, transparent); }
+.app-shell[data-theme="daylight"] .model-menu-option { color: #5a635a; }
+.app-shell[data-theme="daylight"] .model-menu-option:hover:not(:disabled), .app-shell[data-theme="daylight"] .model-menu-option.selected { color: #2a312a; }
+.app-shell[data-theme="daylight"] .model-menu-option small { color: #78817a; }
+.app-shell[data-theme="daylight"] .model-menu-heading { color: #68716a; }
+.app-shell[data-theme="daylight"] .permission-menu button { color: #4c544c; }
+.app-shell[data-theme="daylight"] .permission-menu button:hover, .app-shell[data-theme="daylight"] .permission-menu button.selected { color: var(--text); background: rgba(0,0,0,.05); }
+.app-shell[data-theme="daylight"] .openrouter-trigger { background: linear-gradient(135deg, rgba(122,86,190,.06), #ffffff); }
+.app-shell[data-theme="daylight"] .openrouter-trigger:hover, .app-shell[data-theme="daylight"] .openrouter-picker.open .openrouter-trigger { background: linear-gradient(135deg, rgba(122,86,190,.11), #f8f7fb); }
+.app-shell[data-theme="daylight"] .openrouter-trigger-copy strong { color: #5c3f8f; }
+.app-shell[data-theme="daylight"] .openrouter-options strong { color: #3c443c; }
+.app-shell[data-theme="daylight"] .openrouter-options > button:hover, .app-shell[data-theme="daylight"] .openrouter-options > button.selected { background: rgba(122,86,190,.08); }
 .app-shell[data-theme="daylight"] .approval-command { background: #f6f7f4; color: #38402f; }
 .app-shell[data-theme="daylight"] .studio-list-row strong { color: #333b33; }
 .app-shell[data-theme="daylight"] .composer-caption { color: #838b83; }
@@ -226,8 +255,9 @@ button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px
 .message-body { min-width: 0; color: #d9dcd8; font-size: 13.5px; line-height: 1.68; }
 .message-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .virtual-timeline { height: 100%; direction: rtl; }
-.virtual-timeline [data-testid="virtuoso-item-list"] { padding: 48px 0 12px; direction: ltr; }
+.virtual-timeline [data-testid="virtuoso-item-list"] { direction: ltr; }
 .timeline-entry { width: min(820px, calc(100% - 48px)); margin-inline: auto; }
+.timeline-top-space { height: 48px; direction: ltr; }
 .timeline-bottom-space { height: 76px; direction: ltr; }
 .virtual-timeline .message, .virtual-timeline .activity-row, .virtual-timeline .reasoning-disclosure { margin-left: 0; margin-right: 0; }
 .virtual-timeline .activity-row { margin: 0 0 7px 42px; }

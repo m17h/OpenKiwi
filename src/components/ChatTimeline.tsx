@@ -202,7 +202,17 @@ function TimelineFooter() {
   return <div className="timeline-bottom-space" aria-hidden="true" />;
 }
 
-const VIRTUOSO_COMPONENTS = { Footer: TimelineFooter };
+/**
+ * Top inset must be a real header item: Virtuoso positions its item list with
+ * inline padding for virtualization, which overrides any CSS padding — so a
+ * stylesheet inset silently never applied and the first message sat flush
+ * against the top edge.
+ */
+function TimelineHeader() {
+  return <div className="timeline-top-space" aria-hidden="true" />;
+}
+
+const VIRTUOSO_COMPONENTS = { Header: TimelineHeader, Footer: TimelineFooter };
 
 export function ChatTimeline({
   messages,
