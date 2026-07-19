@@ -60,7 +60,7 @@ import { OpenRouterModelControl, type OpenRouterModel } from "./components/OpenR
 import { ApprovalCenter } from "./components/ApprovalCenter";
 import { CommandPalette } from "./components/CommandPalette";
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import { SettingsModal } from "./components/SettingsModal";
+import { SettingsModal, type SettingsSection } from "./components/SettingsModal";
 import { AuthRequiredModal, RuntimeSetupModal } from "./components/RuntimeModals";
 import type {
   AgentRecord,
@@ -83,6 +83,7 @@ import type {
   PromptProfile,
   ScheduledTask,
   Thread,
+  ThemeName,
   WorkspaceMode,
 } from "./types";
 import { useTaskStore } from "./lib/taskStore";
@@ -154,11 +155,13 @@ export default function App() {
   const [draft, setDraft] = useState("");
   const [startingTurn, setStartingTurn] = useState(false);
   const [settings, setSettings] = useState<AppSettings>(initialSettings);
+  const [previewTheme, setPreviewTheme] = useState<ThemeName | null>(null);
   const [promptProfiles, setPromptProfiles] = useState<PromptProfile[]>(() => loadStored("kiwi.promptProfiles", DEFAULT_PROMPT_PROFILES));
   const [customAgents, setCustomAgents] = useState<CustomAgentProfile[]>(() => loadStored("kiwi.customAgents", []));
   const [projectActions, setProjectActions] = useState<ProjectAction[]>(() => loadStored("kiwi.projectActions", []));
   const [scheduledTasks, setScheduledTasks] = useState<ScheduledTask[]>(() => loadStored("kiwi.scheduledTasks", []));
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsInitialSection, setSettingsInitialSection] = useState<SettingsSection>("general");
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [threadSearch, setThreadSearch] = useState("");
   const [searchResults, setSearchResults] = useState<Thread[] | null>(null);
@@ -247,6 +250,16 @@ export default function App() {
   const persistSettings = useCallback((next: AppSettings) => {
     setSettings(next);
     storeValue("kiwi.settings", next);
+  }, []);
+
+  const openSettings = useCallback((section: SettingsSection = "general") => {
+    setSettingsInitialSection(section);
+    setSettingsOpen(true);
+  }, []);
+
+  const closeSettings = useCallback(() => {
+    setPreviewTheme(null);
+    setSettingsOpen(false);
   }, []);
 
   const persistArchivedThreads = useCallback((update: (current: ArchivedThread[]) => ArchivedThread[]) => {
@@ -672,7 +685,7 @@ export default function App() {
       return;
     }
     if (settings.provider === "openrouter" && !openRouterReady) {
-      setSettingsOpen(true);
+      openSettings("models");
       setError("Add an OpenRouter API key before using OpenRouter.");
       return;
     }
@@ -1133,7 +1146,7 @@ export default function App() {
   });
 
   return (
-    <div className="app-shell" data-theme={settings.theme}>
+    <div className="app-shell" data-theme={previewTheme ?? settings.theme}>
       <aside className={`sidebar ${sidebarOpen ? "open" : "closed"}`}>
         <div className="sidebar-brand">
           <div className="brand-mark"><img src="/openkiwi-logo.png" alt="" /></div>
@@ -1278,7 +1291,7 @@ export default function App() {
         </div>
 
         <div className="sidebar-footer">
-          <button className="sidebar-settings" onClick={() => setSettingsOpen(true)}>
+          <button className="sidebar-settings" onClick={() => openSettings()}>
             <Settings size={16} />
             <span>Settings</span>
             <span className={`provider-dot ${settings.provider}`} />
@@ -1305,7 +1318,7 @@ export default function App() {
               {running ? <LoaderCircle className="spin" size={13} /> : <Circle size={8} fill="currentColor" />}
               <span>{status}</span>
             </div>
-            <button className="provider-pill" onClick={() => setSettingsOpen(true)} aria-label={`Configure ${settings.provider === "openai" ? "OpenAI" : "OpenRouter"} provider`}>
+            <button className="provider-pill" onClick={() => openSettings("models")} aria-label={`Configure ${settings.provider === "openai" ? "OpenAI" : "OpenRouter"} provider`}>
               <span className={`provider-dot ${settings.provider}`} />
               {settings.provider === "openai" ? "OpenAI" : "OpenRouter"}
               {settings.model && <small>{settings.model}</small>}
@@ -1321,7 +1334,7 @@ export default function App() {
           <div className="app-update-banner" role="status">
             <span className="app-update-banner-icon"><Download size={15} /></span>
             <span><strong>OpenKiwi {appUpdater.availableVersion} is ready</strong><small>Review the release notes, then update and restart from Settings.</small></span>
-            <button className="secondary-button" onClick={() => setSettingsOpen(true)}>View update</button>
+            <button className="secondary-button" onClick={() => openSettings("updates")}>View update</button>
           </div>
         )}
 
@@ -1365,7 +1378,7 @@ export default function App() {
               {error && (
                 <div className="error-banner" role="alert">
                   <span>{error}</span>
-                  <button className="error-settings" onClick={() => setSettingsOpen(true)}>Check settings</button>
+                  <button className="error-settings" onClick={() => openSettings()}>Check settings</button>
                   <button onClick={() => setError(null)} aria-label="Dismiss error"><X size={14} /></button>
                 </div>
               )}
@@ -1438,7 +1451,7 @@ export default function App() {
                         </div>
                       )}
                     </div>
-                    <button className="toolbar-button prompt-button" onClick={() => setSettingsOpen(true)} title="Edit instruction prompt">
+                    <button className="toolbar-button prompt-button" onClick={() => openSettings("prompts")} title="Edit instruction prompt">
                       <Command size={14} />
                       Prompt: {settings.systemPrompt ? "custom" : "empty"}
                     </button>
@@ -1538,20 +1551,22 @@ export default function App() {
 
       <SettingsModal
         open={settingsOpen}
+        initialSection={settingsInitialSection}
         appUpdater={appUpdater}
         settings={settings}
         account={account}
         runtimeStatus={runtimeStatus}
         openRouterReady={openRouterReady}
-        onClose={() => setSettingsOpen(false)}
+        onClose={closeSettings}
         onSave={(next) => {
           persistSettings(next);
-          setSettingsOpen(false);
+          closeSettings();
         }}
+        onThemePreview={setPreviewTheme}
         onAccountChange={async () => { await refreshAccount(); await refreshModels(); }}
         onSignIn={beginChatGptLogin}
         onRuntimeRequired={() => setRuntimeSetupOpen(true)}
-        onWorkspaceTools={() => { setSettingsOpen(false); openStudio("tools"); }}
+        onWorkspaceTools={() => { closeSettings(); openStudio("tools"); }}
         onOpenRouterChange={setOpenRouterReady}
         onError={setError}
         profiles={promptProfiles}
@@ -1602,7 +1617,7 @@ export default function App() {
         onProject={(project) => { setActiveProjectId(project.id); setWorkspaceMode("project"); storeValue("kiwi.workspaceMode", "project"); }}
         onThread={(thread) => void selectThread(thread)}
         onNewThread={newThread}
-        onSettings={() => setSettingsOpen(true)}
+        onSettings={() => openSettings()}
         onTool={openStudio}
       />
     </div>

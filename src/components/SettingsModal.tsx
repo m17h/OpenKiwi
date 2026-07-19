@@ -36,10 +36,14 @@ import type {
   ProjectAction,
   PromptProfile,
   ScheduledTask,
+  ThemeName,
 } from "../types";
+
+export type SettingsSection = "general" | "models" | "prompts" | "agents" | "workflows" | "skills" | "tools" | "updates";
 
 export function SettingsModal({
   open,
+  initialSection,
   appUpdater,
   settings,
   account,
@@ -47,6 +51,7 @@ export function SettingsModal({
   openRouterReady,
   onClose,
   onSave,
+  onThemePreview,
   onAccountChange,
   onSignIn,
   onRuntimeRequired,
@@ -75,6 +80,7 @@ export function SettingsModal({
   onToggleSkill,
 }: {
   open: boolean;
+  initialSection: SettingsSection;
   appUpdater: AppUpdater;
   settings: AppSettings;
   account: Account | null;
@@ -82,6 +88,7 @@ export function SettingsModal({
   openRouterReady: boolean;
   onClose: () => void;
   onSave: (settings: AppSettings) => void;
+  onThemePreview: (theme: ThemeName) => void;
   onAccountChange: () => Promise<void>;
   onSignIn: () => Promise<void>;
   onRuntimeRequired: () => void;
@@ -112,14 +119,21 @@ export function SettingsModal({
   const [local, setLocal] = useState(settings);
   const [apiKey, setApiKey] = useState("");
   const [busy, setBusy] = useState(false);
-  const [settingsSection, setSettingsSection] = useState<"general" | "models" | "prompts" | "agents" | "workflows" | "skills" | "tools" | "updates">("general");
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>(initialSection);
 
   useEffect(() => {
     if (open) {
       setLocal(settings);
-      if (appUpdater.phase === "available") setSettingsSection("updates");
+      onThemePreview(settings.theme);
+      setSettingsSection(initialSection);
     }
-  }, [appUpdater.phase, open, settings]);
+  }, [initialSection, onThemePreview, open, settings]);
+
+  useEffect(() => {
+    if (open && initialSection === "general" && appUpdater.phase === "available") {
+      setSettingsSection("updates");
+    }
+  }, [appUpdater.phase, initialSection, open]);
 
   useEffect(() => {
     if (!open) return;
@@ -172,6 +186,11 @@ export function SettingsModal({
     }
   };
 
+  const previewTheme = (theme: ThemeName) => {
+    setLocal((current) => ({ ...current, theme }));
+    onThemePreview(theme);
+  };
+
   const exportDiagnosticBundle = async () => {
     try {
       const path = await save({ title: "Export OpenKiwi diagnostics", defaultPath: `openkiwi-diagnostics-${new Date().toISOString().slice(0, 10)}.json`, filters: [{ name: "JSON", extensions: ["json"] }] });
@@ -206,8 +225,8 @@ export function SettingsModal({
           <section className="settings-section theme-settings-section">
             <div className="settings-section-heading settings-heading-with-action">
               <div className="settings-icon"><Palette size={17} /></div>
-              <div><h3>Appearance</h3><p>Choose a color atmosphere for OpenKiwi. Your selection is stored on this device.</p></div>
-              <button type="button" className="default-theme-button" onClick={() => setLocal({ ...local, theme: DEFAULT_SETTINGS.theme })} disabled={local.theme === DEFAULT_SETTINGS.theme}>
+              <div><h3>Appearance</h3><p>Preview a color atmosphere instantly. Save settings to keep it.</p></div>
+              <button type="button" className="default-theme-button" onClick={() => previewTheme(DEFAULT_SETTINGS.theme)} disabled={local.theme === DEFAULT_SETTINGS.theme}>
                 <RotateCcw size={12} /> App default
               </button>
             </div>
@@ -218,7 +237,7 @@ export function SettingsModal({
                   key={theme.id}
                   className={`theme-card ${local.theme === theme.id ? "selected" : ""}`}
                   aria-pressed={local.theme === theme.id}
-                  onClick={() => setLocal({ ...local, theme: theme.id })}
+                  onClick={() => previewTheme(theme.id)}
                 >
                   <span className="theme-preview" style={{ background: theme.swatches[0] }}>
                     <i style={{ background: theme.swatches[1] }} />

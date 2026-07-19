@@ -1,0 +1,83 @@
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import { DEFAULT_SETTINGS } from "../lib/appConfig";
+import type { AppUpdater } from "../lib/appUpdater";
+import { SettingsModal } from "./SettingsModal";
+
+const updater: AppUpdater = {
+  phase: "idle",
+  currentVersion: "0.4.1",
+  availableVersion: null,
+  notes: null,
+  publishedAt: null,
+  downloadedBytes: 0,
+  totalBytes: null,
+  error: null,
+  checkForUpdates: vi.fn(async () => undefined),
+  downloadAndRestart: vi.fn(async () => undefined),
+};
+
+function modalProps(overrides: Partial<Parameters<typeof SettingsModal>[0]> = {}): Parameters<typeof SettingsModal>[0] {
+  return {
+    open: true,
+    initialSection: "general",
+    appUpdater: updater,
+    settings: { ...DEFAULT_SETTINGS },
+    account: null,
+    runtimeStatus: null,
+    openRouterReady: false,
+    onClose: vi.fn(),
+    onSave: vi.fn(),
+    onThemePreview: vi.fn(),
+    onAccountChange: vi.fn(async () => undefined),
+    onSignIn: vi.fn(async () => undefined),
+    onRuntimeRequired: vi.fn(),
+    onWorkspaceTools: vi.fn(),
+    onOpenRouterChange: vi.fn(),
+    onError: vi.fn(),
+    profiles: [],
+    agents: [],
+    actions: [],
+    schedules: [],
+    projects: [],
+    skillsFolder: "",
+    skills: [],
+    skillsBusy: false,
+    skillsError: "",
+    workspaceToolsAvailable: false,
+    onProfiles: vi.fn(),
+    onAgents: vi.fn(),
+    onActions: vi.fn(),
+    onSchedules: vi.fn(),
+    onChooseSkillsFolder: vi.fn(),
+    onRefreshSkills: vi.fn(),
+    onImportSkills: vi.fn(),
+    onCreateSkill: vi.fn(async () => true),
+    onRenameSkill: vi.fn(() => true),
+    onToggleSkill: vi.fn(),
+    ...overrides,
+  };
+}
+
+describe("SettingsModal", () => {
+  it("opens directly to the requested settings section", () => {
+    render(<SettingsModal {...modalProps({ initialSection: "models" })} />);
+
+    expect(screen.getByRole("button", { name: /Models & accounts/ })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("heading", { name: "Model provider" })).toBeInTheDocument();
+  });
+
+  it("previews a theme immediately but does not save it when cancelled", () => {
+    const onThemePreview = vi.fn();
+    const onClose = vi.fn();
+    const onSave = vi.fn();
+    render(<SettingsModal {...modalProps({ onThemePreview, onClose, onSave })} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Midnight/ }));
+    expect(onThemePreview).toHaveBeenLastCalledWith("midnight");
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(onSave).not.toHaveBeenCalled();
+  });
+});
