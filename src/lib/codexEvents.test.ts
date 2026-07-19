@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { RUNTIME_THREAD_ID, decodeBase64Utf8, routeCodexEvent, type CodexEventContext } from "./codexEvents";
+import { RUNTIME_THREAD_ID, decodeBase64Utf8, routeCodexEvent, runtimeMessage, type CodexEventContext } from "./codexEvents";
 import { resetTaskStore, useTaskStore } from "./taskStore";
 
 function makeContext(overrides: Partial<CodexEventContext> = {}): CodexEventContext {
@@ -10,12 +10,13 @@ function makeContext(overrides: Partial<CodexEventContext> = {}): CodexEventCont
     onStatus: vi.fn(),
     onError: vi.fn(),
     onAuthRequired: vi.fn(),
-    onDiffReset: vi.fn(),
     onRateSummary: vi.fn(),
     onTerminalOutput: vi.fn(),
     onTurnCompleted: vi.fn(),
+    onApprovalRequested: vi.fn(),
     onAccountUpdated: vi.fn(),
     onLoginFailed: vi.fn(),
+    onProviderToolCompatibilityError: vi.fn(),
     ...overrides,
   };
 }
@@ -30,6 +31,24 @@ describe("routeCodexEvent", () => {
     useTaskStore.getState().flushDeltas();
     expect(useTaskStore.getState().tasks["thread-b"]?.messages[0]?.text).toBe("hello");
     expect(useTaskStore.getState().tasks["thread-active"]?.messages ?? []).toHaveLength(0);
+  });
+
+  it("streams model thinking into a collapsed reasoning activity and prefers full content", () => {
+    const ctx = makeContext();
+    routeCodexEvent({ method: "item/reasoning/summaryTextDelta", params: { threadId: "thread-a", itemId: "reasoning-1", delta: "Short summary" } }, ctx);
+    routeCodexEvent({ method: "item/reasoning/textDelta", params: { threadId: "thread-a", itemId: "reasoning-1", delta: "Detailed thinking" } }, ctx);
+    useTaskStore.getState().flushDeltas();
+
+    expect(useTaskStore.getState().tasks["thread-a"].activities[0]).toMatchObject({
+      id: "reasoning-1",
+      kind: "reasoning",
+      title: "Model thinking",
+      detail: "Detailed thinking",
+      status: "inProgress",
+    });
+
+    routeCodexEvent({ method: "item/completed", params: { threadId: "thread-a", item: { id: "reasoning-1", type: "reasoning", summary: ["Finished summary"], content: ["Finished thinking"] } } }, ctx);
+    expect(useTaskStore.getState().tasks["thread-a"].activities[0]).toMatchObject({ detail: "Finished thinking", status: "completed" });
   });
 
   it("never attributes threadless events to the active thread", () => {
@@ -104,6 +123,26 @@ describe("routeCodexEvent", () => {
     routeCodexEvent({ method: "guardianWarning", params: { threadId: "thread-w", message: "careful" } }, ctx);
     expect(useTaskStore.getState().tasks["thread-w"]?.activities[0]?.title).toBe("careful");
   });
+
+  it("keeps fallback model metadata warnings in diagnostics instead of the chat", () => {
+    const ctx = makeContext();
+    routeCodexEvent({ method: "warning", params: { threadId: "thread-w", message: "Model metadata for `vendor/new-model` not found. Defaulting to fallback metadata; this can degrade performance." } }, ctx);
+    expect(useTaskStore.getState().tasks["thread-w"]?.activities ?? []).toHaveLength(0);
+    expect(ctx.audit).toHaveBeenCalledWith("runtime.warning.suppressed", expect.objectContaining({ method: "warning" }), "thread-w");
+  });
+
+  it("renders structured provider errors instead of object coercion", () => {
+    const ctx = makeContext();
+    routeCodexEvent({ method: "error", params: { threadId: "thread-e", error: { message: "Provider failed", code: 400 } } }, ctx);
+    expect(useTaskStore.getState().tasks["thread-e"]?.activities[0]?.title).toBe("Provider failed");
+  });
+
+  it("flags incompatible provider tool schemas for a runtime refresh", () => {
+    const ctx = makeContext();
+    routeCodexEvent({ method: "error", params: { threadId: "thread-e", error: { message: "400 INVALID_ARGUMENT: function_declarations[9].parameters.required[0] property is not defined" } } }, ctx);
+    expect(ctx.onProviderToolCompatibilityError).toHaveBeenCalledWith("thread-e");
+    expect(useTaskStore.getState().tasks["thread-e"]?.activities[0]?.title).toBe("The selected model rejected an incompatible connected-app tool.");
+  });
 });
 
 describe("decodeBase64Utf8", () => {
@@ -111,5 +150,12 @@ describe("decodeBase64Utf8", () => {
     expect(decodeBase64Utf8(btoa("plain"))).toBe("plain");
     expect(decodeBase64Utf8("&&& not base64 &&&")).toBe("");
     expect(decodeBase64Utf8(undefined)).toBe("");
+  });
+});
+
+describe("runtimeMessage", () => {
+  it("extracts nested error messages and serializes unknown objects", () => {
+    expect(runtimeMessage({ error: { message: "Readable failure" } })).toBe("Readable failure");
+    expect(runtimeMessage({ code: 400 })).toBe('{"code":400}');
   });
 });

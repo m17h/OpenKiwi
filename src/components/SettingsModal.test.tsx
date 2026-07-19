@@ -71,13 +71,28 @@ describe("SettingsModal", () => {
     const onThemePreview = vi.fn();
     const onClose = vi.fn();
     const onSave = vi.fn();
+    // Cancelling with unsaved changes now asks for confirmation first.
+    vi.stubGlobal("confirm", vi.fn(() => true));
     render(<SettingsModal {...modalProps({ onThemePreview, onClose, onSave })} />);
 
     fireEvent.click(screen.getByRole("button", { name: /Midnight/ }));
     expect(onThemePreview).toHaveBeenLastCalledWith("midnight");
 
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(window.confirm).toHaveBeenCalledOnce();
     expect(onClose).toHaveBeenCalledOnce();
     expect(onSave).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps the modal open when the user declines to discard changes", () => {
+    const onClose = vi.fn();
+    vi.stubGlobal("confirm", vi.fn(() => false));
+    render(<SettingsModal {...modalProps({ onClose })} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Midnight/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onClose).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
   });
 });

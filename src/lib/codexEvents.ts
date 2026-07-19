@@ -10,6 +10,39 @@ import type { TokenUsageView } from "../components/StudioDock";
  */
 export const RUNTIME_THREAD_ID = "runtime";
 
+const FALLBACK_MODEL_METADATA_WARNING = /^Model metadata for [`'“].+?[`'”] not found\. Defaulting to fallback metadata/i;
+
+export function runtimeMessage(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (value instanceof Error) return value.message.trim();
+  if (!value || typeof value !== "object") return "";
+  const object = value as Record<string, unknown>;
+  for (const key of ["message", "error", "detail", "details", "reason"]) {
+    const nested = runtimeMessage(object[key]);
+    if (nested) return nested;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return "Runtime error";
+  }
+}
+
+export function isFallbackModelMetadataWarning(value: unknown): boolean {
+  return FALLBACK_MODEL_METADATA_WARNING.test(runtimeMessage(value));
+}
+
+export function isProviderToolCompatibilityError(method: string, message: string): boolean {
+  return method === "error" && /INVALID_ARGUMENT/i.test(message) && /(function_declarations|required\[|tool)/i.test(message);
+}
+
+function runtimeActivityTitle(method: string, message: string): string {
+  if (isProviderToolCompatibilityError(method, message)) {
+    return "The selected model rejected an incompatible connected-app tool.";
+  }
+  return message || (method === "error" ? "Runtime error" : "Runtime warning");
+}
+
 export function decodeBase64Utf8(value: unknown): string {
   if (typeof value !== "string" || !value) return "";
   try {
@@ -20,6 +53,40 @@ export function decodeBase64Utf8(value: unknown): string {
   }
 }
 
+// Terminal output arrives as independent base64 chunks that can split a
+// multi-byte UTF-8 sequence, so each output stream gets its own persistent
+// streaming decoder — a single shared decoder would glue one stream's dangling
+// byte prefix onto another stream's next chunk.
+const terminalDecoders = new Map<string, TextDecoder>();
+const MAX_TERMINAL_DECODERS = 32;
+
+export function decodeTerminalChunk(value: unknown, streamKey = "default"): string {
+  if (typeof value !== "string" || !value) return "";
+  let decoder = terminalDecoders.get(streamKey);
+  if (!decoder) {
+    if (terminalDecoders.size >= MAX_TERMINAL_DECODERS) {
+      const oldest = terminalDecoders.keys().next().value;
+      if (oldest !== undefined) terminalDecoders.delete(oldest);
+    }
+    decoder = new TextDecoder("utf-8");
+    terminalDecoders.set(streamKey, decoder);
+  }
+  try {
+    const bytes = Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
+    return decoder.decode(bytes, { stream: true });
+  } catch {
+    return "";
+  }
+}
+
+/** Command output can reach megabytes; the UI only ever shows the tail. */
+const MAX_ACTIVITY_DETAIL = 4000;
+
+function truncatedDetail(detail: string | undefined): string | undefined {
+  if (!detail || detail.length <= MAX_ACTIVITY_DETAIL) return detail;
+  return detail.slice(-MAX_ACTIVITY_DETAIL);
+}
+
 export interface CodexEventContext {
   bindingFor: (threadId: string) => string | undefined;
   respond: (id: number | string, result: JsonObject) => Promise<void>;
@@ -27,12 +94,13 @@ export interface CodexEventContext {
   onStatus: (status: string) => void;
   onError: (message: string) => void;
   onAuthRequired: () => void;
-  onDiffReset: () => void;
   onRateSummary: (summary: string) => void;
   onTerminalOutput: (delta: string) => void;
   onTurnCompleted: (threadId: string, turn: Turn | null) => void;
+  onApprovalRequested: (threadId: string) => void;
   onAccountUpdated: () => void;
   onLoginFailed: (message: string) => void;
+  onProviderToolCompatibilityError: (threadId: string) => void;
 }
 
 export function handleThreadItem(threadId: string, item: ThreadItem, ctx: CodexEventContext): void {
@@ -48,7 +116,7 @@ export function handleThreadItem(threadId: string, item: ThreadItem, ctx: CodexE
       id,
       kind: "command",
       title: item.command ?? "Run command",
-      detail: item.aggregatedOutput ?? item.cwd,
+      detail: truncatedDetail(item.aggregatedOutput ?? item.cwd),
       status: item.status,
     });
     return;
@@ -62,8 +130,12 @@ export function handleThreadItem(threadId: string, item: ThreadItem, ctx: CodexE
     });
     return;
   }
-  if (item.type === "reasoning" && item.summary?.length) {
-    taskStore.upsertActivity(threadId, { id, kind: "reasoning", title: item.summary.join(" ") });
+  if (item.type === "reasoning") {
+    const content = (item.content ?? []).filter((entry): entry is string => typeof entry === "string").join("\n\n").trim();
+    const summary = (item.summary ?? []).join("\n\n").trim();
+    const existing = taskStore.tasks[threadId]?.activities.find((activity) => activity.id === id);
+    const detail = content || existing?.detail || summary;
+    if (detail) taskStore.upsertActivity(threadId, { id, kind: "reasoning", title: "Model thinking", detail, status: "completed" });
     return;
   }
   if (item.type === "collabAgentToolCall") {
@@ -138,10 +210,20 @@ export function routeCodexEvent(event: CodexEvent, ctx: CodexEventContext): void
       receivedAt: Date.now(),
     });
     ctx.audit("approval.requested", { method, params }, eventThreadId);
+    ctx.onApprovalRequested(eventThreadId);
     return;
   }
   if (method === "item/agentMessage/delta") {
     useTaskStore.getState().queueAssistantDelta(eventThreadId, String(params.itemId), String(params.delta ?? ""));
+    return;
+  }
+  if (method === "item/reasoning/summaryTextDelta" || method === "item/reasoning/textDelta") {
+    useTaskStore.getState().queueReasoningDelta(
+      eventThreadId,
+      String(params.itemId),
+      String(params.delta ?? ""),
+      method === "item/reasoning/textDelta" ? "content" : "summary",
+    );
     return;
   }
   if (method === "item/started" || method === "item/completed") {
@@ -150,7 +232,6 @@ export function routeCodexEvent(event: CodexEvent, ctx: CodexEventContext): void
   }
   if (method === "turn/diff/updated") {
     useTaskStore.getState().setDiff(eventThreadId, String(params.diff ?? ""));
-    ctx.onDiffReset();
     return;
   }
   if (method === "thread/tokenUsage/updated") {
@@ -168,7 +249,7 @@ export function routeCodexEvent(event: CodexEvent, ctx: CodexEventContext): void
     return;
   }
   if (method === "command/exec/outputDelta") {
-    ctx.onTerminalOutput(decodeBase64Utf8(params.deltaBase64));
+    ctx.onTerminalOutput(decodeTerminalChunk(params.deltaBase64, String(params.processId ?? eventThreadId)));
     return;
   }
   if (method === "account/rateLimits/updated") {
@@ -203,11 +284,19 @@ export function routeCodexEvent(event: CodexEvent, ctx: CodexEventContext): void
     return;
   }
   if (method === "error" || method === "warning" || method === "guardianWarning" || method === "configWarning") {
+    const message = runtimeMessage(params.message ?? params.error);
+    if (method !== "error" && isFallbackModelMetadataWarning(message)) {
+      ctx.audit("runtime.warning.suppressed", { method, message }, eventThreadId);
+      return;
+    }
+    const details = runtimeMessage(params.details);
+    const title = runtimeActivityTitle(method, message);
+    if (isProviderToolCompatibilityError(method, message)) ctx.onProviderToolCompatibilityError(eventThreadId);
     useTaskStore.getState().upsertActivity(eventThreadId, {
       id: `${method}-${Date.now()}`,
       kind: "warning",
-      title: String(params.message ?? params.error ?? "Runtime warning"),
-      detail: typeof params.details === "string" ? params.details : undefined,
+      title,
+      detail: details || (title !== message ? message : undefined),
     });
     return;
   }

@@ -2,14 +2,17 @@ import { useEffect, useRef } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
+import type { TerminalOutputStore } from "../hooks/useTerminal";
 
 export function XtermPanel({
-  output,
+  outputStore,
+  placeholder,
   running,
   onInput,
   onResize,
 }: {
-  output: string;
+  outputStore: TerminalOutputStore;
+  placeholder?: string;
   running: boolean;
   onInput: (value: string) => void;
   onResize: (columns: number, rows: number) => void;
@@ -49,17 +52,35 @@ export function XtermPanel({
     };
   }, [onInput, onResize]);
 
+  // Output is written to xterm imperatively via the store subscription — no
+  // React re-render per chunk. On mount the accumulated buffer is replayed.
   useEffect(() => {
-    const terminal = terminalRef.current;
-    if (!terminal) return;
-    if (output.length < renderedLengthRef.current) {
-      terminal.clear();
-      renderedLengthRef.current = 0;
+    let placeholderShown = false;
+    const sync = () => {
+      const terminal = terminalRef.current;
+      if (!terminal) return;
+      const output = outputStore.get();
+      if (placeholderShown && output) {
+        terminal.reset();
+        placeholderShown = false;
+        renderedLengthRef.current = 0;
+      }
+      if (output.length < renderedLengthRef.current) {
+        terminal.clear();
+        renderedLengthRef.current = 0;
+      }
+      const delta = output.slice(renderedLengthRef.current);
+      if (delta) terminal.write(delta.replace(/\n/g, "\r\n"));
+      renderedLengthRef.current = output.length;
+    };
+    renderedLengthRef.current = 0;
+    if (!outputStore.get() && placeholder) {
+      terminalRef.current?.write(placeholder.replace(/\n/g, "\r\n"));
+      placeholderShown = true;
     }
-    const delta = output.slice(renderedLengthRef.current);
-    if (delta) terminal.write(delta.replace(/\n/g, "\r\n"));
-    renderedLengthRef.current = output.length;
-  }, [output]);
+    sync();
+    return outputStore.subscribe(sync);
+  }, [outputStore, placeholder]);
 
   useEffect(() => {
     if (running) terminalRef.current?.focus();

@@ -15,4 +15,19 @@ describe("timelineFromTurns", () => {
     ]);
     expect(snapshot.activities.map((activity) => [activity.id, activity.timelineOrder])).toEqual([["command", 2]]);
   });
+
+  it("restores model thinking as a collapsed reasoning activity", () => {
+    const snapshot = timelineFromTurns([{ id: "turn-1", items: [
+      { id: "reasoning", type: "reasoning", summary: ["Summary"], content: ["Detailed thinking"] },
+      { id: "assistant", type: "agentMessage", text: "Answer" },
+    ] }]);
+
+    expect(snapshot.activities[0]).toMatchObject({
+      id: "reasoning",
+      kind: "reasoning",
+      title: "Model thinking",
+      detail: "Detailed thinking",
+      status: "completed",
+    });
+  });
 });

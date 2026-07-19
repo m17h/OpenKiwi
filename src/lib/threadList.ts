@@ -1,5 +1,46 @@
 import type { Thread } from "../types";
 
+export type ThreadSidebarIndex = Record<string, Thread>;
+
+function normalizedPath(path: string): string {
+  const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  return normalized || "/";
+}
+
+export function sidebarThread(thread: Thread): Thread {
+  const { turns: _turns, ...summary } = thread;
+  return summary;
+}
+
+export function rememberSidebarThread(index: ThreadSidebarIndex, thread: Thread): ThreadSidebarIndex {
+  return { ...index, [thread.id]: sidebarThread(thread) };
+}
+
+export function forgetSidebarThread(index: ThreadSidebarIndex, threadId: string): ThreadSidebarIndex {
+  if (!index[threadId]) return index;
+  const next = { ...index };
+  delete next[threadId];
+  return next;
+}
+
+export function reconcileWorkspaceThreads(
+  runtimeThreads: Thread[],
+  rememberedThreads: ThreadSidebarIndex,
+  workspacePath: string,
+  bindings: Record<string, string>,
+): Thread[] {
+  const targetPath = normalizedPath(workspacePath);
+  const belongsToWorkspace = (thread: Thread) => normalizedPath(bindings[thread.id] || thread.cwd) === targetPath;
+  const merged = new Map<string, Thread>();
+  for (const thread of Object.values(rememberedThreads)) {
+    if (belongsToWorkspace(thread)) merged.set(thread.id, thread);
+  }
+  for (const thread of runtimeThreads) {
+    if (belongsToWorkspace(thread)) merged.set(thread.id, sidebarThread(thread));
+  }
+  return [...merged.values()].sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
 export function upsertThread(threads: Thread[], thread: Thread): Thread[] {
   const index = threads.findIndex((entry) => entry.id === thread.id);
   if (index === -1) return [...threads, thread];

@@ -28,9 +28,39 @@ export function customAgentConfig(agents: CustomAgentProfile[]): Record<string, 
 export interface ThreadStartOptions {
   serviceName?: string;
   customAgents?: CustomAgentProfile[];
+  modelContextWindow?: number;
   /** Non-interactive threads (scheduled runs) never issue approval requests,
    *  because nobody is guaranteed to be present to answer them. */
   interactive: boolean;
+}
+
+/**
+ * Third-party providers should only receive the local coding surface that
+ * Codex owns (shell, files, approvals, agents, and user-configured MCP).
+ * ChatGPT connected-app tools are fetched independently by the runtime and
+ * can contain provider-specific schemas that OpenRouter destinations reject.
+ */
+export function threadRuntimeConfig(run: ScheduleRunSettings, options: Pick<ThreadStartOptions, "customAgents" | "modelContextWindow"> = {}): JsonObject {
+  const contextWindow = Number(options.modelContextWindow);
+  return {
+    project_doc_max_bytes: run.projectInstructionsEnabled ? 32_768 : 0,
+    project_doc_fallback_filenames: [],
+    developer_instructions: "",
+    model_reasoning_effort: run.ultra ? "ultra" : run.reasoningEffort,
+    ...(run.provider === "openrouter" && Number.isFinite(contextWindow) && contextWindow > 0
+      ? { model_context_window: Math.floor(contextWindow) }
+      : {}),
+    agents: {
+      max_threads: run.subagentMax,
+      max_depth: 1,
+      ...customAgentConfig(options.customAgents ?? []),
+    },
+    features: {
+      multi_agent: run.subagentsEnabled,
+      ...(run.provider === "openrouter" ? { apps: false, remote_plugin: false } : {}),
+    },
+    ...(run.provider === "openrouter" ? { apps: { _default: { enabled: false } } } : {}),
+  };
 }
 
 export function threadStartParams(run: ScheduleRunSettings, cwd: string, options: ThreadStartOptions): JsonObject {
@@ -41,26 +71,31 @@ export function threadStartParams(run: ScheduleRunSettings, cwd: string, options
     approvalPolicy: options.interactive && run.permission === "ask" ? "on-request" : "never",
     baseInstructions: run.systemPrompt,
     developerInstructions: "",
-    config: {
-      project_doc_max_bytes: run.projectInstructionsEnabled ? 32_768 : 0,
-      project_doc_fallback_filenames: [],
-      developer_instructions: "",
-      model_reasoning_effort: run.ultra ? "ultra" : run.reasoningEffort,
-      agents: {
-        max_threads: run.subagentMax,
-        max_depth: 1,
-        ...customAgentConfig(options.customAgents ?? []),
-      },
-      features: {
-        multi_agent: run.subagentsEnabled,
-      },
-    },
+    config: threadRuntimeConfig(run, options),
     serviceName: options.serviceName ?? "OpenKiwi",
     serviceTier: run.serviceTier,
   };
   if (run.model.trim()) params.model = run.model.trim();
   if (run.provider === "openrouter") params.modelProvider = "openrouter";
   return params;
+}
+
+export function threadResumeParams(
+  run: ScheduleRunSettings,
+  threadId: string,
+  cwd: string,
+  options: Pick<ThreadStartOptions, "customAgents" | "modelContextWindow"> & { excludeTurns?: boolean } = {},
+): JsonObject {
+  return {
+    threadId,
+    cwd,
+    runtimeWorkspaceRoots: [cwd],
+    ...(options.excludeTurns ? { excludeTurns: true } : {}),
+    ...(run.provider === "openrouter" ? {
+      modelProvider: "openrouter",
+      config: threadRuntimeConfig(run, options),
+    } : {}),
+  };
 }
 
 export function turnStartParams(run: ScheduleRunSettings, threadId: string, cwd: string, input: JsonObject[]): JsonObject {

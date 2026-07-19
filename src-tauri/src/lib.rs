@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     ffi::OsString,
     fs,
@@ -12,6 +12,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use axum::{
+    body::{Body, Bytes},
+    extract::State as AxumState,
+    http::{header, HeaderMap, Method, Response, StatusCode, Uri},
+    routing::any,
+    Router,
+};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -20,7 +27,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, Command},
     sync::{oneshot, Mutex},
-    time::{timeout, Duration},
+    time::{timeout, timeout_at, Duration, Instant},
 };
 
 const KEYRING_SERVICE: &str = "com.kiwi.harness";
@@ -30,15 +37,24 @@ type PendingMap = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>
 
 struct AppServer {
     stdin: Mutex<ChildStdin>,
-    child: Mutex<Child>,
+    child: Arc<Mutex<Child>>,
+    pid: Option<u32>,
     pending: PendingMap,
     next_id: AtomicI64,
     alive: Arc<AtomicBool>,
+    openrouter_proxy_url: Option<String>,
+    openrouter_proxy_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 #[derive(Default)]
 struct RuntimeState {
     server: Mutex<Option<Arc<AppServer>>>,
+}
+
+/// Shared SQLite connection, opened once at startup with DDL applied.
+/// Locked with a std::sync::Mutex and only used inside spawn_blocking.
+struct StateDb {
+    connection: Arc<std::sync::Mutex<Connection>>,
 }
 
 #[derive(Serialize)]
@@ -94,10 +110,12 @@ impl AppServer {
             self.pending.lock().await.remove(&id);
             return Err(format!("Could not write to Codex App Server: {error}"));
         }
-        stdin
-            .flush()
-            .await
-            .map_err(|error| format!("Could not flush Codex App Server input: {error}"))?;
+        if let Err(error) = stdin.flush().await {
+            self.alive.store(false, Ordering::Release);
+            drop(stdin);
+            self.pending.lock().await.remove(&id);
+            return Err(format!("Could not flush Codex App Server input: {error}"));
+        }
         drop(stdin);
 
         match timeout(request_timeout, receiver).await {
@@ -141,6 +159,9 @@ impl AppServer {
     async fn shutdown(&self) {
         self.alive.store(false, Ordering::Release);
         let _ = self.child.lock().await.kill().await;
+        if let Some(task) = &self.openrouter_proxy_task {
+            task.abort();
+        }
     }
 
     fn is_alive(&self) -> bool {
@@ -148,12 +169,253 @@ impl AppServer {
     }
 }
 
-fn openrouter_key() -> Option<String> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, OPENROUTER_ACCOUNT).ok()?;
-    entry
-        .get_password()
-        .ok()
-        .filter(|value| !value.trim().is_empty())
+async fn openrouter_key() -> Option<String> {
+    // Keyring calls can block on the OS credential store; keep them off the
+    // async runtime worker threads.
+    tauri::async_runtime::spawn_blocking(|| {
+        let entry = keyring::Entry::new(KEYRING_SERVICE, OPENROUTER_ACCOUNT).ok()?;
+        entry
+            .get_password()
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+fn random_hex_token() -> Result<String, String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| format!("Could not generate a secure proxy token: {error}"))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+#[derive(Clone)]
+struct OpenRouterProxyState {
+    client: reqwest::Client,
+    api_key: String,
+    path_token: String,
+}
+
+fn sanitize_json_schema(value: &mut Value) -> usize {
+    let mut removed = 0;
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                removed += sanitize_json_schema(item);
+            }
+        }
+        Value::Object(object) => {
+            for child in object.values_mut() {
+                removed += sanitize_json_schema(child);
+            }
+
+            let property_names = object
+                .get("properties")
+                .and_then(Value::as_object)
+                .map(|properties| properties.keys().cloned().collect::<HashSet<_>>());
+            if object.contains_key("required") {
+                match property_names {
+                    Some(property_names) => {
+                        if let Some(required) =
+                            object.get_mut("required").and_then(Value::as_array_mut)
+                        {
+                            let before = required.len();
+                            required.retain(|name| {
+                                name.as_str()
+                                    .is_some_and(|name| property_names.contains(name))
+                            });
+                            removed += before.saturating_sub(required.len());
+                            if required.is_empty() {
+                                object.remove("required");
+                            }
+                        } else {
+                            object.remove("required");
+                            removed += 1;
+                        }
+                    }
+                    None => {
+                        object.remove("required");
+                        removed += 1;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    removed
+}
+
+fn proxy_response(status: StatusCode, body: impl Into<Body>) -> Response<Body> {
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(body.into())
+        .unwrap_or_else(|_| Response::new(Body::empty()))
+}
+
+fn inject_openrouter_proxy_config(params: &mut Value, proxy_url: Option<&str>) {
+    let Some(proxy_url) = proxy_url else { return };
+    let Some(params) = params.as_object_mut() else {
+        return;
+    };
+    if params.get("modelProvider").and_then(Value::as_str) != Some("openrouter") {
+        return;
+    }
+
+    let config = params
+        .entry("config")
+        .or_insert_with(|| Value::Object(Default::default()));
+    if !config.is_object() {
+        *config = Value::Object(Default::default());
+    }
+    let config = config
+        .as_object_mut()
+        .expect("config was replaced with an object");
+    let providers = config
+        .entry("model_providers")
+        .or_insert_with(|| Value::Object(Default::default()));
+    if !providers.is_object() {
+        *providers = Value::Object(Default::default());
+    }
+    let providers = providers
+        .as_object_mut()
+        .expect("model_providers was replaced with an object");
+    let openrouter = providers
+        .entry("openrouter")
+        .or_insert_with(|| Value::Object(Default::default()));
+    if !openrouter.is_object() {
+        *openrouter = Value::Object(Default::default());
+    }
+    openrouter
+        .as_object_mut()
+        .expect("openrouter was replaced with an object")
+        .insert("base_url".into(), Value::String(proxy_url.into()));
+}
+
+async fn proxy_openrouter_request(
+    AxumState(state): AxumState<Arc<OpenRouterProxyState>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    let expected_prefix = format!("/{}", state.path_token);
+    let Some(upstream_path) = uri.path().strip_prefix(&expected_prefix) else {
+        return proxy_response(StatusCode::NOT_FOUND, "Not found");
+    };
+    if !upstream_path.is_empty() && !upstream_path.starts_with('/') {
+        return proxy_response(StatusCode::NOT_FOUND, "Not found");
+    }
+
+    let mut upstream_url = format!(
+        "https://openrouter.ai/api/v1{}",
+        if upstream_path.is_empty() {
+            "/"
+        } else {
+            upstream_path
+        }
+    );
+    if let Some(query) = uri.query() {
+        upstream_url.push('?');
+        upstream_url.push_str(query);
+    }
+
+    let sanitized_body = match serde_json::from_slice::<Value>(&body) {
+        Ok(mut json_body) => {
+            sanitize_json_schema(&mut json_body);
+            match serde_json::to_vec(&json_body) {
+                Ok(body) => body,
+                Err(error) => {
+                    return proxy_response(
+                        StatusCode::BAD_REQUEST,
+                        format!("Could not prepare OpenRouter request: {error}"),
+                    )
+                }
+            }
+        }
+        Err(_) => body.to_vec(),
+    };
+
+    let mut request = state
+        .client
+        .request(method, upstream_url)
+        .bearer_auth(&state.api_key)
+        .body(sanitized_body);
+    for name in [
+        header::ACCEPT,
+        header::CONTENT_TYPE,
+        header::USER_AGENT,
+        header::HeaderName::from_static("http-referer"),
+        header::HeaderName::from_static("x-title"),
+    ] {
+        if let Some(value) = headers.get(&name) {
+            request = request.header(name, value);
+        }
+    }
+
+    let upstream = match request.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return proxy_response(
+                StatusCode::BAD_GATEWAY,
+                format!("Could not reach OpenRouter: {error}"),
+            )
+        }
+    };
+    let status = upstream.status();
+    let upstream_headers = upstream.headers().clone();
+    let mut response = Response::builder().status(status);
+    for (name, value) in upstream_headers {
+        let Some(name) = name else { continue };
+        if name != header::CONTENT_LENGTH
+            && name != header::TRANSFER_ENCODING
+            && name != header::CONNECTION
+        {
+            response = response.header(name, value);
+        }
+    }
+    response
+        .body(Body::from_stream(upstream.bytes_stream()))
+        .unwrap_or_else(|_| {
+            proxy_response(
+                StatusCode::BAD_GATEWAY,
+                "Could not stream OpenRouter response",
+            )
+        })
+}
+
+async fn start_openrouter_proxy(
+    api_key: String,
+) -> Result<(String, tokio::task::JoinHandle<()>), String> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|error| {
+            format!("Could not start the OpenRouter compatibility service: {error}")
+        })?;
+    let address = listener
+        .local_addr()
+        .map_err(|error| format!("Could not read the OpenRouter compatibility address: {error}"))?;
+    let path_token = random_hex_token()?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|error| {
+            format!("Could not create the OpenRouter compatibility client: {error}")
+        })?;
+    let state = Arc::new(OpenRouterProxyState {
+        client,
+        api_key,
+        path_token: path_token.clone(),
+    });
+    let router = Router::new()
+        .fallback(any(proxy_openrouter_request))
+        .with_state(state);
+    let task = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    Ok((format!("http://{address}/{path_token}"), task))
 }
 
 async fn write_runtime_config(codex_home: &PathBuf) -> Result<(), String> {
@@ -369,6 +631,153 @@ fn unix_timestamp_ms() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
+const PASTED_IMAGE_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
+const PASTED_IMAGE_CACHE_MAX_BYTES: u64 = 512 * 1024 * 1024;
+
+#[derive(Clone, Debug)]
+struct PastedImageCandidate {
+    path: PathBuf,
+    modified_at_ms: i64,
+    size: u64,
+}
+
+fn pasted_image_removal_plan(
+    mut candidates: Vec<PastedImageCandidate>,
+    now_ms: i64,
+    retention_ms: i64,
+    max_total_bytes: u64,
+    preserve: Option<&Path>,
+) -> Vec<PathBuf> {
+    candidates.sort_by_key(|candidate| candidate.modified_at_ms);
+    let mut removed = HashSet::new();
+
+    for candidate in &candidates {
+        if preserve.is_some_and(|path| path == candidate.path) {
+            continue;
+        }
+        if now_ms.saturating_sub(candidate.modified_at_ms) > retention_ms {
+            removed.insert(candidate.path.clone());
+        }
+    }
+
+    let mut total = candidates
+        .iter()
+        .filter(|candidate| !removed.contains(&candidate.path))
+        .map(|candidate| candidate.size)
+        .sum::<u64>();
+    for candidate in &candidates {
+        if total <= max_total_bytes {
+            break;
+        }
+        if removed.contains(&candidate.path) || preserve.is_some_and(|path| path == candidate.path)
+        {
+            continue;
+        }
+        removed.insert(candidate.path.clone());
+        total = total.saturating_sub(candidate.size);
+    }
+
+    candidates
+        .into_iter()
+        .filter_map(|candidate| removed.contains(&candidate.path).then_some(candidate.path))
+        .collect()
+}
+
+fn cleanup_pasted_image_cache(directory: &Path, preserve: Option<&Path>) -> Result<(), String> {
+    if !directory.exists() {
+        return Ok(());
+    }
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(directory)
+        .map_err(|error| format!("Could not inspect the pasted-image cache: {error}"))?
+    {
+        let entry = entry.map_err(|error| format!("Could not inspect a pasted image: {error}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("Could not inspect a pasted image: {error}"))?;
+        let file_name = entry.file_name();
+        if !file_type.is_file() || !file_name.to_string_lossy().starts_with("pasted-") {
+            continue;
+        }
+        let metadata = entry
+            .metadata()
+            .map_err(|error| format!("Could not inspect a pasted image: {error}"))?;
+        let modified_at_ms = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .and_then(|duration| duration.as_millis().try_into().ok())
+            .unwrap_or_else(unix_timestamp_ms);
+        candidates.push(PastedImageCandidate {
+            path: entry.path(),
+            modified_at_ms,
+            size: metadata.len(),
+        });
+    }
+
+    for path in pasted_image_removal_plan(
+        candidates,
+        unix_timestamp_ms(),
+        PASTED_IMAGE_RETENTION_MS,
+        PASTED_IMAGE_CACHE_MAX_BYTES,
+        preserve,
+    ) {
+        fs::remove_file(path)
+            .map_err(|error| format!("Could not clean up an expired pasted image: {error}"))?;
+    }
+    Ok(())
+}
+
+/// Persists an image pasted into the composer (which arrives as raw bytes,
+/// not a file path) so it can be attached to a turn like any local image.
+#[tauri::command]
+async fn save_pasted_image(
+    app: AppHandle,
+    data_base64: String,
+    extension: String,
+) -> Result<String, String> {
+    use base64::Engine as _;
+    let safe_extension = match extension.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" => extension.as_str(),
+        _ => "png",
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64.as_bytes())
+        .map_err(|error| format!("Could not decode the pasted image: {error}"))?;
+    if bytes.is_empty() {
+        return Err("The pasted image was empty".to_string());
+    }
+    if bytes.len() > 50 * 1024 * 1024 {
+        return Err("The pasted image exceeds 50 MB".to_string());
+    }
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not resolve OpenKiwi app data: {error}"))?
+        .join("pasted-images");
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|error| format!("Could not create the pasted-images folder: {error}"))?;
+    let token = random_hex_token()?;
+    let file = dir.join(format!(
+        "pasted-{}-{}.{safe_extension}",
+        unix_timestamp_ms(),
+        &token[..8]
+    ));
+    tokio::fs::write(&file, &bytes)
+        .await
+        .map_err(|error| format!("Could not save the pasted image: {error}"))?;
+    let cleanup_directory = dir.clone();
+    let preserved_file = file.clone();
+    // Cleanup is best effort: a successfully saved paste must remain usable
+    // even if an older cache entry cannot be removed.
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        cleanup_pasted_image_cache(&cleanup_directory, Some(&preserved_file))
+    })
+    .await;
+    Ok(file.to_string_lossy().into_owned())
+}
+
 fn state_db_path(app: &AppHandle) -> Result<PathBuf, String> {
     let app_data = app
         .path()
@@ -386,6 +795,7 @@ fn open_state_db(path: &Path) -> Result<Connection, String> {
         .execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
+             PRAGMA busy_timeout=5000;
              CREATE TABLE IF NOT EXISTS app_state (
                key TEXT PRIMARY KEY,
                value TEXT NOT NULL,
@@ -404,24 +814,36 @@ fn open_state_db(path: &Path) -> Result<Connection, String> {
     Ok(connection)
 }
 
+fn shared_state_db(app: &AppHandle) -> Result<Arc<std::sync::Mutex<Connection>>, String> {
+    app.try_state::<StateDb>()
+        .map(|db| db.connection.clone())
+        .ok_or_else(|| "OpenKiwi state database is not initialized".to_string())
+}
+
+fn lock_state_db(
+    connection: &std::sync::Mutex<Connection>,
+) -> Result<std::sync::MutexGuard<'_, Connection>, String> {
+    connection
+        .lock()
+        .map_err(|_| "OpenKiwi state database is unavailable".to_string())
+}
+
 #[tauri::command]
 async fn state_read(app: AppHandle, key: String) -> Result<Option<Value>, String> {
-    let path = state_db_path(&app)?;
+    let connection = shared_state_db(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let connection = open_state_db(&path)?;
-        let value = connection
-            .query_row(
-                "SELECT value FROM app_state WHERE key = ?1",
-                params![key],
-                |row| row.get::<_, String>(0),
-            )
-            .ok();
-        value
-            .map(|json| {
-                serde_json::from_str(&json)
-                    .map_err(|error| format!("Stored OpenKiwi state is invalid: {error}"))
-            })
-            .transpose()
+        let connection = lock_state_db(&connection)?;
+        match connection.query_row(
+            "SELECT value FROM app_state WHERE key = ?1",
+            params![key],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(json) => serde_json::from_str(&json)
+                .map(Some)
+                .map_err(|error| format!("Stored OpenKiwi state is invalid: {error}")),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(format!("Could not read OpenKiwi state: {error}")),
+        }
     })
     .await
     .map_err(|error| format!("State read task failed: {error}"))?
@@ -429,9 +851,9 @@ async fn state_read(app: AppHandle, key: String) -> Result<Option<Value>, String
 
 #[tauri::command]
 async fn state_write(app: AppHandle, key: String, value: Value) -> Result<(), String> {
-    let path = state_db_path(&app)?;
+    let connection = shared_state_db(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let connection = open_state_db(&path)?;
+        let connection = lock_state_db(&connection)?;
         let json = serde_json::to_string(&value).map_err(|error| format!("Could not encode OpenKiwi state: {error}"))?;
         connection
             .execute(
@@ -453,9 +875,9 @@ async fn audit_append(
     thread_id: Option<String>,
     payload: Value,
 ) -> Result<(), String> {
-    let path = state_db_path(&app)?;
+    let connection = shared_state_db(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let connection = open_state_db(&path)?;
+        let connection = lock_state_db(&connection)?;
         let json = serde_json::to_string(&payload).map_err(|error| format!("Could not encode audit event: {error}"))?;
         connection
             .execute(
@@ -473,9 +895,9 @@ async fn audit_append(
 async fn diagnostics_read(app: AppHandle) -> Result<Value, String> {
     let runtime = codex_runtime_status(app.clone()).await;
     let database = state_db_path(&app)?;
-    let audit_path = database.clone();
+    let shared_connection = shared_state_db(&app)?;
     let audit = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<Value>, String> {
-        let connection = open_state_db(&audit_path)?;
+        let connection = lock_state_db(&shared_connection)?;
         let mut statement = connection
             .prepare("SELECT created_at, kind, thread_id, payload FROM audit_events ORDER BY created_at DESC LIMIT 200")
             .map_err(|error| format!("Could not read diagnostics audit history: {error}"))?;
@@ -506,12 +928,53 @@ async fn diagnostics_read(app: AppHandle) -> Result<Value, String> {
     }))
 }
 
+/// Restrict diagnostics exports to visible files inside the user's home
+/// directory. The webview supplies the path (picked via the OS save dialog),
+/// so it must not be trusted to point anywhere on disk.
+fn validated_export_path(app: &AppHandle, path: &str) -> Result<PathBuf, String> {
+    let target = PathBuf::from(path);
+    if !target.is_absolute() {
+        return Err("Diagnostics can only be exported to an absolute path.".into());
+    }
+    let file_name = target
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "Diagnostics export needs a file name.".to_string())?
+        .to_string();
+    if file_name.starts_with('.') {
+        return Err("Diagnostics cannot be exported to a hidden file.".into());
+    }
+    let parent = target
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| "Diagnostics export needs a destination folder.".to_string())?;
+    let parent = parent
+        .canonicalize()
+        .map_err(|error| format!("Could not open the export folder: {error}"))?;
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|error| format!("Could not resolve the home folder: {error}"))?;
+    let home = home.canonicalize().unwrap_or(home);
+    let relative = parent
+        .strip_prefix(&home)
+        .map_err(|_| "Diagnostics can only be exported inside your home folder.".to_string())?;
+    if relative
+        .components()
+        .any(|component| component.as_os_str().to_string_lossy().starts_with('.'))
+    {
+        return Err("Diagnostics cannot be exported into a hidden folder.".into());
+    }
+    Ok(parent.join(file_name))
+}
+
 #[tauri::command]
 async fn diagnostics_export(app: AppHandle, path: String) -> Result<(), String> {
+    let destination = validated_export_path(&app, &path)?;
     let diagnostics = diagnostics_read(app).await?;
     let text = serde_json::to_string_pretty(&diagnostics)
         .map_err(|error| format!("Could not encode diagnostics: {error}"))?;
-    tokio::fs::write(path, text)
+    tokio::fs::write(destination, text)
         .await
         .map_err(|error| format!("Could not export diagnostics: {error}"))
 }
@@ -1117,29 +1580,63 @@ async fn spawn_server(app: &AppHandle) -> Result<Arc<AppServer>, String> {
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
+    let mut openrouter_proxy_url = None;
+    let mut openrouter_proxy_task = None;
+    if let Some(key) = openrouter_key().await {
+        let (proxy_url, task) = start_openrouter_proxy(key.clone()).await?;
+        let proxy_url_toml = serde_json::to_string(&proxy_url)
+            .map_err(|error| format!("Could not configure OpenRouter compatibility: {error}"))?;
+        command
+            .arg("-c")
+            .arg(format!(
+                "model_providers.openrouter.base_url={proxy_url_toml}"
+            ))
+            .env("OPENROUTER_API_KEY", key);
+        openrouter_proxy_url = Some(proxy_url);
+        openrouter_proxy_task = Some(task);
+    }
+
     if let Some(path) = runtime_path(&codex_binary, home.as_deref()) {
         command.env("PATH", path);
     }
 
-    if let Some(key) = openrouter_key() {
-        command.env("OPENROUTER_API_KEY", key);
-    }
-
-    let mut child = command.spawn().map_err(|error| {
-        format!(
-            "Could not start the Codex runtime at `{}`: {error}",
-            codex_binary.display()
-        )
-    })?;
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "Codex App Server did not expose stdin".to_string())?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "Codex App Server did not expose stdout".to_string())?;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            if let Some(task) = &openrouter_proxy_task {
+                task.abort();
+            }
+            return Err(format!(
+                "Could not start the Codex runtime at `{}`: {error}",
+                codex_binary.display()
+            ));
+        }
+    };
+    let abort_proxy = |task: &Option<tokio::task::JoinHandle<()>>| {
+        if let Some(task) = task {
+            task.abort();
+        }
+    };
+    let stdin = match child.stdin.take() {
+        Some(stdin) => stdin,
+        None => {
+            abort_proxy(&openrouter_proxy_task);
+            let _ = child.start_kill();
+            return Err("Codex App Server did not expose stdin".to_string());
+        }
+    };
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            abort_proxy(&openrouter_proxy_task);
+            let _ = child.start_kill();
+            return Err("Codex App Server did not expose stdout".to_string());
+        }
+    };
     let stderr = child.stderr.take();
+    let pid = child.id();
+    let child = Arc::new(Mutex::new(child));
+    let child_for_reader = child.clone();
     let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
     let pending_for_reader = pending.clone();
     let app_for_reader = app.clone();
@@ -1147,9 +1644,41 @@ async fn spawn_server(app: &AppHandle) -> Result<Arc<AppServer>, String> {
     let alive_for_reader = alive.clone();
 
     tauri::async_runtime::spawn(async move {
+        const DELTA_FLUSH_INTERVAL: Duration = Duration::from_millis(25);
         let mut lines = BufReader::new(stdout).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
+        // Streaming "…Delta" notifications are coalesced into a single
+        // "codex-events" array emit, flushed on a ~25ms tick or before any
+        // non-delta message so ordering is strictly preserved.
+        let mut delta_buffer: Vec<Value> = Vec::new();
+        let mut flush_deadline = Instant::now();
+        let flush_deltas = |buffer: &mut Vec<Value>, app: &AppHandle| {
+            if !buffer.is_empty() {
+                let batch = std::mem::take(buffer);
+                let _ = app.emit("codex-events", Value::Array(batch));
+            }
+        };
+
+        loop {
+            // `Lines::next_line` is cancellation safe, so racing it against
+            // the flush deadline cannot drop partial lines.
+            let next = if delta_buffer.is_empty() {
+                lines.next_line().await
+            } else {
+                match timeout_at(flush_deadline, lines.next_line()).await {
+                    Ok(next) => next,
+                    Err(_) => {
+                        flush_deltas(&mut delta_buffer, &app_for_reader);
+                        continue;
+                    }
+                }
+            };
+            let line = match next {
+                Ok(Some(line)) => line,
+                _ => break,
+            };
+
             let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                flush_deltas(&mut delta_buffer, &app_for_reader);
                 let _ = app_for_reader.emit(
                     "codex-event",
                     json!({ "stream": "stderr", "line": format!("Invalid app-server message: {line}") }),
@@ -1160,6 +1689,7 @@ async fn spawn_server(app: &AppHandle) -> Result<Arc<AppServer>, String> {
             let is_response = message.get("id").is_some()
                 && (message.get("result").is_some() || message.get("error").is_some());
             if is_response {
+                flush_deltas(&mut delta_buffer, &app_for_reader);
                 if let Some(id) = message.get("id").and_then(Value::as_i64) {
                     if let Some(sender) = pending_for_reader.lock().await.remove(&id) {
                         let result = if let Some(error) = message.get("error") {
@@ -1175,9 +1705,23 @@ async fn spawn_server(app: &AppHandle) -> Result<Arc<AppServer>, String> {
                     }
                 }
             } else {
-                let _ = app_for_reader.emit("codex-event", message);
+                let is_delta_notification = message.get("id").is_none()
+                    && message
+                        .get("method")
+                        .and_then(Value::as_str)
+                        .is_some_and(|method| method.ends_with("Delta"));
+                if is_delta_notification {
+                    if delta_buffer.is_empty() {
+                        flush_deadline = Instant::now() + DELTA_FLUSH_INTERVAL;
+                    }
+                    delta_buffer.push(message);
+                } else {
+                    flush_deltas(&mut delta_buffer, &app_for_reader);
+                    let _ = app_for_reader.emit("codex-event", message);
+                }
             }
         }
+        flush_deltas(&mut delta_buffer, &app_for_reader);
 
         alive_for_reader.store(false, Ordering::Release);
         let mut pending = pending_for_reader.lock().await;
@@ -1188,6 +1732,14 @@ async fn spawn_server(app: &AppHandle) -> Result<Arc<AppServer>, String> {
             "codex-event",
             json!({ "stream": "stderr", "line": "Codex App Server connection closed" }),
         );
+        drop(pending);
+
+        // Reap the child so it does not linger as a zombie after stdout EOF.
+        let mut child = child_for_reader.lock().await;
+        if timeout(Duration::from_secs(5), child.wait()).await.is_err() {
+            // `kill` also awaits the child, so it is reaped either way.
+            let _ = child.kill().await;
+        }
     });
 
     if let Some(stderr) = stderr {
@@ -1203,20 +1755,31 @@ async fn spawn_server(app: &AppHandle) -> Result<Arc<AppServer>, String> {
 
     let server = Arc::new(AppServer {
         stdin: Mutex::new(stdin),
-        child: Mutex::new(child),
+        child,
+        pid,
         pending,
         next_id: AtomicI64::new(1),
         alive,
+        openrouter_proxy_url,
+        openrouter_proxy_task,
     });
 
-    server.request("initialize", initialize_params()).await?;
-    server.notify("initialized", json!({})).await?;
+    if let Err(error) = server.request("initialize", initialize_params()).await {
+        server.shutdown().await;
+        return Err(error);
+    }
+    if let Err(error) = server.notify("initialized", json!({})).await {
+        server.shutdown().await;
+        return Err(error);
+    }
     Ok(server)
 }
 
 async fn ensure_server(app: &AppHandle, state: &RuntimeState) -> Result<Arc<AppServer>, String> {
     let mut guard = state.server.lock().await;
-    if let Some(server) = guard.as_ref() {
+    // Another task can repopulate the slot while the lock is released for the
+    // stale shutdown, so re-check the guard every time it is re-acquired.
+    while let Some(server) = guard.as_ref() {
         if server.is_alive() {
             return Ok(server.clone());
         }
@@ -1238,7 +1801,7 @@ async fn codex_rpc(
     app: AppHandle,
     state: State<'_, RuntimeState>,
     method: String,
-    params: Value,
+    mut params: Value,
 ) -> Result<Value, String> {
     const ALLOWED_METHODS: &[&str] = &[
         "account/read",
@@ -1330,6 +1893,12 @@ async fn codex_rpc(
         ));
     }
     let server = ensure_server(&app, &state).await?;
+    if matches!(
+        method.as_str(),
+        "thread/start" | "thread/resume" | "thread/fork"
+    ) {
+        inject_openrouter_proxy_config(&mut params, server.openrouter_proxy_url.as_deref());
+    }
     match server.request(&method, params.clone()).await {
         Ok(result) => Ok(result),
         Err(error) if !server.is_alive() => {
@@ -1373,15 +1942,23 @@ async fn save_openrouter_key(
     state: State<'_, RuntimeState>,
     api_key: String,
 ) -> Result<(), String> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, OPENROUTER_ACCOUNT)
-        .map_err(|error| format!("Could not open the OS credential store: {error}"))?;
-    if api_key.trim().is_empty() {
-        let _ = entry.delete_credential();
-    } else {
-        entry
-            .set_password(api_key.trim())
-            .map_err(|error| format!("Could not save the OpenRouter key: {error}"))?;
-    }
+    let trimmed = api_key.trim().to_string();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let entry = keyring::Entry::new(KEYRING_SERVICE, OPENROUTER_ACCOUNT)
+            .map_err(|error| format!("Could not open the OS credential store: {error}"))?;
+        if trimmed.is_empty() {
+            match entry.delete_credential() {
+                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                Err(error) => Err(format!("Could not remove the OpenRouter key: {error}")),
+            }
+        } else {
+            entry
+                .set_password(&trimmed)
+                .map_err(|error| format!("Could not save the OpenRouter key: {error}"))
+        }
+    })
+    .await
+    .map_err(|error| format!("Credential task failed: {error}"))??;
 
     if let Some(server) = state.server.lock().await.take() {
         server.shutdown().await;
@@ -1391,8 +1968,8 @@ async fn save_openrouter_key(
 }
 
 #[tauri::command]
-fn has_openrouter_key() -> bool {
-    openrouter_key().is_some()
+async fn has_openrouter_key() -> bool {
+    openrouter_key().await.is_some()
 }
 
 #[tauri::command]
@@ -1404,7 +1981,7 @@ async fn list_openrouter_models() -> Result<Value, String> {
     let mut request = client
         .get("https://openrouter.ai/api/v1/models?supported_parameters=tools&limit=1000")
         .header("X-Title", "OpenKiwi");
-    if let Some(key) = openrouter_key() {
+    if let Some(key) = openrouter_key().await {
         request = request.bearer_auth(key);
     }
     request
@@ -1427,6 +2004,40 @@ async fn restart_runtime(app: AppHandle, state: State<'_, RuntimeState>) -> Resu
     Ok(())
 }
 
+/// Synchronously shut down the managed Codex app-server before the process
+/// exits. `std::process::exit` skips drop glue, so `kill_on_drop` alone would
+/// orphan the child. Bounded by short timeouts so quitting can never hang.
+fn shutdown_runtime_on_exit(app: &AppHandle) {
+    let Some(state) = app.try_state::<RuntimeState>() else {
+        return;
+    };
+    let server = tauri::async_runtime::block_on(async {
+        match timeout(Duration::from_millis(500), state.server.lock()).await {
+            Ok(mut guard) => guard.take(),
+            Err(_) => None,
+        }
+    });
+    let Some(server) = server else { return };
+    let graceful = tauri::async_runtime::block_on(async {
+        timeout(Duration::from_secs(2), server.shutdown())
+            .await
+            .is_ok()
+    });
+    if !graceful {
+        // Last resort: signal the child by pid without touching any locks.
+        if let Some(pid) = server.pid {
+            #[cfg(unix)]
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .status();
+            #[cfg(windows)]
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .status();
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1438,6 +2049,11 @@ pub fn run() {
             #[cfg(desktop)]
             app.handle()
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
+            let db_path = state_db_path(app.handle()).map_err(std::io::Error::other)?;
+            let connection = open_state_db(&db_path).map_err(std::io::Error::other)?;
+            app.manage(StateDb {
+                connection: Arc::new(std::sync::Mutex::new(connection)),
+            });
             Ok(())
         })
         .manage(RuntimeState::default())
@@ -1456,17 +2072,73 @@ pub fn run() {
             codex_rpc,
             codex_respond,
             save_openrouter_key,
+            save_pasted_image,
             has_openrouter_key,
             list_openrouter_models,
             restart_runtime
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running OpenKiwi");
+        .build(tauri::generate_context!())
+        .expect("error while running OpenKiwi")
+        .run(|app_handle, event| {
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
+                shutdown_runtime_on_exit(app_handle);
+            }
+        });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pasted_image_cleanup_expires_old_files_and_preserves_the_current_paste() {
+        let current = PathBuf::from("current.png");
+        let candidates = vec![
+            PastedImageCandidate {
+                path: PathBuf::from("expired.png"),
+                modified_at_ms: 10,
+                size: 2,
+            },
+            PastedImageCandidate {
+                path: current.clone(),
+                modified_at_ms: 10,
+                size: 2,
+            },
+            PastedImageCandidate {
+                path: PathBuf::from("recent.png"),
+                modified_at_ms: 95,
+                size: 2,
+            },
+        ];
+        let removed = pasted_image_removal_plan(candidates, 100, 20, 100, Some(&current));
+        assert_eq!(removed, vec![PathBuf::from("expired.png")]);
+    }
+
+    #[test]
+    fn pasted_image_cleanup_removes_oldest_files_until_under_the_size_cap() {
+        let candidates = vec![
+            PastedImageCandidate {
+                path: PathBuf::from("oldest.png"),
+                modified_at_ms: 80,
+                size: 4,
+            },
+            PastedImageCandidate {
+                path: PathBuf::from("middle.png"),
+                modified_at_ms: 90,
+                size: 4,
+            },
+            PastedImageCandidate {
+                path: PathBuf::from("newest.png"),
+                modified_at_ms: 100,
+                size: 4,
+            },
+        ];
+        let removed = pasted_image_removal_plan(candidates, 100, 1_000, 8, None);
+        assert_eq!(removed, vec![PathBuf::from("oldest.png")]);
+    }
 
     #[test]
     fn initialize_negotiates_fields_used_by_project_threads() {
@@ -1489,6 +2161,65 @@ mod tests {
     fn runtime_compatibility_accepts_tested_contract() {
         assert!(runtime_is_compatible("codex-cli 0.145.0-alpha.18"));
         assert!(!runtime_is_compatible("codex-cli 0.144.9"));
+    }
+
+    #[test]
+    fn openrouter_schema_sanitizer_removes_only_missing_required_properties() {
+        let mut request = json!({
+            "tools": [{
+                "type": "function",
+                "name": "render_artifact",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "snapshot": {
+                            "type": "object",
+                            "properties": { "path": { "type": "string" } },
+                            "required": ["path", "manifest"]
+                        }
+                    },
+                    "required": ["snapshot", "unknown"]
+                }
+            }]
+        });
+
+        assert_eq!(sanitize_json_schema(&mut request), 2);
+        assert_eq!(
+            request.pointer("/tools/0/parameters/required"),
+            Some(&json!(["snapshot"]))
+        );
+        assert_eq!(
+            request.pointer("/tools/0/parameters/properties/snapshot/required"),
+            Some(&json!(["path"]))
+        );
+    }
+
+    #[test]
+    fn openrouter_schema_sanitizer_drops_required_without_properties() {
+        let mut schema = json!({ "type": "object", "required": ["ghost"] });
+        assert_eq!(sanitize_json_schema(&mut schema), 1);
+        assert!(schema.get("required").is_none());
+    }
+
+    #[test]
+    fn openrouter_proxy_is_injected_into_thread_config() {
+        let mut params = json!({
+            "modelProvider": "openrouter",
+            "config": { "features": { "apps": false } }
+        });
+        inject_openrouter_proxy_config(&mut params, Some("http://127.0.0.1:3210/token"));
+        assert_eq!(
+            params.pointer("/config/model_providers/openrouter/base_url"),
+            Some(&json!("http://127.0.0.1:3210/token"))
+        );
+        assert_eq!(params.pointer("/config/features/apps"), Some(&json!(false)));
+    }
+
+    #[test]
+    fn openrouter_proxy_is_not_injected_into_openai_threads() {
+        let mut params = json!({ "modelProvider": "openai", "config": {} });
+        inject_openrouter_proxy_config(&mut params, Some("http://127.0.0.1:3210/token"));
+        assert!(params.pointer("/config/model_providers").is_none());
     }
 
     fn skill_test_directory(label: &str) -> PathBuf {

@@ -35,7 +35,7 @@ export interface ThreadItem {
   id?: string;
   type: string;
   text?: string;
-  content?: Array<{ type: string; text?: string }>;
+  content?: Array<{ type: string; text?: string }> | string[];
   command?: string;
   cwd?: string;
   status?: string;

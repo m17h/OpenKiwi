@@ -15,13 +15,19 @@ export function useCodexEvents(context: CodexEventContext): void {
   useEffect(() => {
     let disposed = false;
     let stop: (() => void) | undefined;
-    void onCodexEvent((event) => routeCodexEvent(event, contextRef.current)).then((unlisten) => {
-      if (disposed) {
-        unlisten();
-      } else {
-        stop = unlisten;
-      }
-    });
+    onCodexEvent((event) => routeCodexEvent(event, contextRef.current))
+      .then((unlisten) => {
+        if (disposed) {
+          unlisten();
+        } else {
+          stop = unlisten;
+        }
+      })
+      .catch((reason) => {
+        contextRef.current.onError(
+          `OpenKiwi could not subscribe to runtime events: ${reason instanceof Error ? reason.message : String(reason)}`,
+        );
+      });
     return () => {
       disposed = true;
       stop?.();

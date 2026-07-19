@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import {
   Bot,
   Boxes,
@@ -29,6 +29,7 @@ import {
 import { FileBrowser } from "./FileBrowser";
 import { XtermPanel } from "./XtermPanel";
 import type { ProjectAction } from "../types";
+import type { TerminalOutputStore } from "../hooks/useTerminal";
 
 export type StudioTab = "files" | "review" | "agents" | "terminal" | "history" | "context" | "usage" | "tools" | "git";
 
@@ -88,14 +89,14 @@ export function StudioDock(props: {
   projectPath?: string;
   activeThread: boolean;
   diff: string;
-  approvedDiff: boolean;
   agents: AgentRecord[];
-  terminalOutput: string;
+  terminalOutput: TerminalOutputStore;
   terminalCommand: string;
   terminalRunning: boolean;
   checkpoints: CheckpointRecord[];
   attachments: AttachmentRecord[];
   usage: TokenUsageView | null;
+  costEstimate?: string;
   rateSummary: string;
   skills: SkillView[];
   mcpServers: McpView[];
@@ -107,7 +108,6 @@ export function StudioDock(props: {
   onClose: () => void;
   onRefreshDiff: () => void;
   onReview: () => void;
-  onApproveDiff: () => void;
   onOpenAgent: (id: string) => void;
   onStopAgent: (id: string) => void;
   onTerminalCommand: (value: string) => void;
@@ -132,13 +132,32 @@ export function StudioDock(props: {
   onToggleSkill: (path: string) => void;
   onConnectMcp: (server: McpView) => void;
 }) {
-  const diffHunks = useMemo(() => props.diff.split("\n").reduce<Array<{ id: string; label: string }>>((hunks, line) => {
-    if (line.startsWith("@@")) hunks.push({ id: `${hunks.length}-${line}`, label: line });
-    return hunks;
-  }, []), [props.diff]);
-  const [approvedHunks, setApprovedHunks] = useState<Record<string, boolean>>({});
-  const diffFiles = useMemo(() => props.diff.split("\n").filter((line) => line.startsWith("diff --git ")).map((line) => line.match(/^diff --git a\/(.+?) b\/(.+)$/)?.[2]).filter((path): path is string => Boolean(path)), [props.diff]);
-  useEffect(() => setApprovedHunks({}), [props.diff]);
+  const diffSections = useMemo(() => {
+    if (!props.diff) return [];
+    const sections: Array<{ path: string; text: string; additions: number; deletions: number }> = [];
+    let current: { path: string; lines: string[]; additions: number; deletions: number } | null = null;
+    const push = () => {
+      if (current) sections.push({ path: current.path, text: current.lines.join("\n"), additions: current.additions, deletions: current.deletions });
+    };
+    for (const line of props.diff.split("\n")) {
+      if (line.startsWith("diff --git ")) {
+        push();
+        current = { path: line.match(/^diff --git a\/(.+?) b\/(.+)$/)?.[2] ?? line, lines: [line], additions: 0, deletions: 0 };
+      } else if (current) {
+        current.lines.push(line);
+        if (line.startsWith("+") && !line.startsWith("+++")) current.additions += 1;
+        else if (line.startsWith("-") && !line.startsWith("---")) current.deletions += 1;
+      }
+    }
+    push();
+    return sections;
+  }, [props.diff]);
+  const diffFiles = useMemo(() => diffSections.map((section) => section.path), [diffSections]);
+  // When the dock is closed, skip all panel work (diff parsing, xterm,
+  // file browser) — it re-rendered fully even while hidden.
+  if (!props.open) {
+    return <aside className="studio-dock closed" aria-label="Project workspace tools" aria-hidden inert />;
+  }
   return (
     <aside className={`studio-dock ${props.open ? "open" : "closed"}`} aria-label="Project workspace tools" aria-hidden={!props.open} inert={!props.open ? true : undefined}>
       <nav className="studio-tabs" aria-label="Workspace tools">
@@ -152,10 +171,23 @@ export function StudioDock(props: {
 
         {props.tab === "review" && <>
           <PanelHeader icon={SearchCode} title="Review center" subtitle="Inspect the live turn diff" onClose={props.onClose} />
-          <div className="studio-actions"><button onClick={props.onRefreshDiff}><RefreshCw size={13} /> Refresh</button><button onClick={props.onReview} disabled={!props.activeThread}><Bot size={13} /> AI review</button><button className={props.approvedDiff ? "approved" : ""} onClick={props.onApproveDiff} disabled={!props.diff}><Check size={13} /> {props.approvedDiff ? "Approved" : "Approve"}</button></div>
-          <div className="diff-summary"><span><CodeXml size={13} /> Working changes</span><small>{props.diff ? `${props.diff.split("\n").filter((line) => line.startsWith("diff --git")).length || 1} file groups` : "No changes loaded"}</small></div>
-          {diffHunks.length > 0 && <div className="hunk-review-list">{diffHunks.map((hunk, index) => <button key={hunk.id} className={approvedHunks[hunk.id] ? "approved" : ""} onClick={() => setApprovedHunks((current) => ({ ...current, [hunk.id]: !current[hunk.id] }))}><span>{approvedHunks[hunk.id] ? <Check size={11} /> : index + 1}</span><code>{hunk.label}</code></button>)}</div>}
-          <pre className="diff-view">{props.diff || "Run a task or refresh to inspect the current Git diff."}</pre>
+          <div className="studio-actions"><button onClick={props.onRefreshDiff}><RefreshCw size={13} /> Refresh</button><button onClick={props.onReview} disabled={!props.activeThread}><Bot size={13} /> AI review</button></div>
+          <div className="diff-summary"><span><CodeXml size={13} /> Working changes</span><small>{diffSections.length ? `${diffSections.length} file${diffSections.length === 1 ? "" : "s"} changed` : "No changes loaded"}</small></div>
+          {diffSections.length ? (
+            <div className="diff-file-sections">
+              {diffSections.map((section) => (
+                <details className="diff-file" key={section.path} open={diffSections.length === 1}>
+                  <summary>
+                    <code>{section.path}</code>
+                    <span className="diff-file-stats"><em className="added">+{section.additions}</em> <em className="removed">−{section.deletions}</em></span>
+                  </summary>
+                  <DiffText text={section.text} />
+                </details>
+              ))}
+            </div>
+          ) : (
+            <pre className="diff-view">{props.diff || "Run a task or refresh to inspect the current Git diff."}</pre>
+          )}
         </>}
 
         {props.tab === "agents" && <>
@@ -166,7 +198,7 @@ export function StudioDock(props: {
 
         {props.tab === "terminal" && <>
           <PanelHeader icon={TerminalSquare} title="Terminal" subtitle={props.projectName || "Project shell"} onClose={props.onClose} />
-          <XtermPanel output={props.terminalOutput || "OPENKIWI terminal ready\n"} running={props.terminalRunning} onInput={props.onTerminalInput} onResize={props.onTerminalResize} />
+          <XtermPanel outputStore={props.terminalOutput} placeholder={"OPENKIWI terminal ready\n"} running={props.terminalRunning} onInput={props.onTerminalInput} onResize={props.onTerminalResize} />
           <div className="terminal-input"><span>$</span><input aria-label="Terminal command" value={props.terminalCommand} onChange={(e) => props.onTerminalCommand(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") props.onRunTerminal(); }} placeholder="npm test" /><button aria-label={props.terminalRunning ? "Stop terminal command" : "Run terminal command"} onClick={props.terminalRunning ? props.onStopTerminal : props.onRunTerminal}>{props.terminalRunning ? <CircleStop size={14} /> : <Play size={14} />}</button></div>
         </>}
 
@@ -189,7 +221,7 @@ export function StudioDock(props: {
           {props.usage?.contextWindow && props.usage.totalTokens / props.usage.contextWindow > 0.7 && (
             <div className="history-warning"><Gauge size={13} /> Context is getting full. Compacting summarizes older turns so the thread can keep going.</div>
           )}
-          <div className="usage-hero"><span>Context used</span><strong>{props.usage?.totalTokens.toLocaleString() ?? "—"}</strong><small>{props.usage?.contextWindow ? `of ${props.usage.contextWindow.toLocaleString()} tokens` : "Current thread"}</small><i style={{ width: `${Math.min(100, ((props.usage?.totalTokens ?? 0) / (props.usage?.contextWindow || 1)) * 100)}%` }} /></div>
+          <div className="usage-hero"><span>Context used</span><strong>{props.usage?.totalTokens.toLocaleString() ?? "—"}</strong><small>{props.usage?.contextWindow ? `of ${props.usage.contextWindow.toLocaleString()} tokens` : "Current thread"}{props.costEstimate ? ` · ${props.costEstimate}` : ""}</small><i style={{ width: `${Math.min(100, ((props.usage?.totalTokens ?? 0) / (props.usage?.contextWindow || 1)) * 100)}%` }} /></div>
           <div className="metric-grid three"><div><strong>{props.usage?.inputTokens.toLocaleString() ?? "—"}</strong><span>Input</span></div><div><strong>{props.usage?.outputTokens.toLocaleString() ?? "—"}</strong><span>Output</span></div><div><strong>{props.usage?.reasoningOutputTokens.toLocaleString() ?? "—"}</strong><span>Reasoning</span></div></div>
           <div className="rate-card"><span>Account limits</span><strong>{props.rateSummary || "Sign in to view live limits"}</strong></div>
           <h3 className="panel-label">Request audit</h3><div className="audit-table">{props.promptAudit.map((row) => <div key={row.label}><span>{row.label}</span><code>{row.value}</code></div>)}</div>
@@ -219,4 +251,21 @@ export function StudioDock(props: {
 
 function Empty({ icon: Icon, title, text }: { icon: typeof CodeXml; title: string; text: string }) {
   return <div className="studio-empty"><Icon size={21} /><strong>{title}</strong><span>{text}</span></div>;
+}
+
+function DiffText({ text }: { text: string }) {
+  return (
+    <pre className="diff-view">
+      {text.split("\n").map((line, index) => {
+        const kind = line.startsWith("+") && !line.startsWith("+++")
+          ? "diff-line-add"
+          : line.startsWith("-") && !line.startsWith("---")
+            ? "diff-line-del"
+            : line.startsWith("@@")
+              ? "diff-line-hunk"
+              : undefined;
+        return <span key={index} className={kind}>{`${line}\n`}</span>;
+      })}
+    </pre>
+  );
 }

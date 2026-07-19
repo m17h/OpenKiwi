@@ -1,4 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
@@ -51,9 +53,18 @@ import {
 } from "./lib/codex";
 import { loadStored, storeValue } from "./lib/storage";
 import { DEFAULT_OPENAI_MODEL, DEFAULT_PROMPT_PROFILES, DEFAULT_SETTINGS, THEMES } from "./lib/appConfig";
-import { commandSandbox, threadStartParams, turnStartParams } from "./lib/turnConfig";
+import { commandSandbox, threadResumeParams, threadRuntimeConfig, threadStartParams, turnStartParams } from "./lib/turnConfig";
 import { threadSearchParams, threadsForWorkspace, type ThreadSearchResponse } from "./lib/threadSearch";
-import { optimisticStartedThread, upsertThread } from "./lib/threadList";
+import { buildTurnInput, withoutSentAttachments } from "./lib/turnInput";
+import {
+  forgetSidebarThread,
+  optimisticStartedThread,
+  reconcileWorkspaceThreads,
+  rememberSidebarThread,
+  sidebarThread,
+  upsertThread,
+  type ThreadSidebarIndex,
+} from "./lib/threadList";
 import { timelineFromTurns } from "./lib/threadTimeline";
 import { type ReasoningEffort, ModelPowerControl, type RuntimeModel } from "./components/ModelPowerControl";
 import { OpenRouterModelControl, type OpenRouterModel } from "./components/OpenRouterModelControl";
@@ -113,6 +124,7 @@ const EMPTY_AGENTS: AgentRecord[] = [];
 
 const initialProjects = loadStored<Project[]>("kiwi.projects", []).sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
 const initialWorkspaceMode: WorkspaceMode = loadStored<WorkspaceMode>("kiwi.workspaceMode", initialProjects.length ? "project" : "chat");
+const initialKnownThreads = loadStored<ThreadSidebarIndex>("kiwi.knownThreads", {});
 const storedSettings = loadStored<Partial<AppSettings>>("kiwi.settings", {});
 const initialSettings: AppSettings = {
   ...DEFAULT_SETTINGS,
@@ -143,6 +155,31 @@ function PermissionIcon({ mode, size = 15 }: { mode: PermissionMode; size?: numb
   if (mode === "read-only") return <Shield size={size} />;
   if (mode === "full") return <ShieldAlert size={size} />;
   return <ShieldCheck size={size} />;
+}
+
+/**
+ * Per-row spinner/unread badge with its own narrow store subscription, so
+ * streaming updates re-render one sidebar row instead of the whole App.
+ */
+function ThreadRowBadge({ threadId }: { threadId: string }) {
+  const status = useTaskStore((state) => state.statuses[threadId]);
+  const unread = useTaskStore((state) => Boolean(state.tasks[threadId]?.unread));
+  return (
+    <>
+      {(status === "running" || status === "starting") && <LoaderCircle className="spin thread-state" size={11} />}
+      {unread && <i className="thread-unread" />}
+    </>
+  );
+}
+
+/**
+ * Subscribes to the streaming timeline itself so per-frame delta flushes stop
+ * at this component boundary instead of re-rendering the entire App.
+ */
+function ConversationTimeline({ threadId, running, thinkingLabel, onEditMessage }: { threadId: string; running: boolean; thinkingLabel: string; onEditMessage: (text: string) => void }) {
+  const messages = useTaskStore((state) => state.tasks[threadId]?.messages ?? EMPTY_MESSAGES);
+  const activities = useTaskStore((state) => state.tasks[threadId]?.activities ?? EMPTY_ACTIVITIES);
+  return <ChatTimeline messages={messages} activities={activities} running={running} thinkingLabel={thinkingLabel} onEditMessage={onEditMessage} />;
 }
 
 export default function App() {
@@ -182,10 +219,11 @@ export default function App() {
   const [loginStarting, setLoginStarting] = useState(false);
   const [account, setAccount] = useState<Account | null>(null);
   const threadProjectBindingsRef = useRef<Record<string, string> | null>(null);
+  const knownThreadsRef = useRef<ThreadSidebarIndex | null>(null);
+  const providerRepairThreadsRef = useRef(new Set<string>());
   const [openRouterReady, setOpenRouterReady] = useState(false);
   const [studioOpen, setStudioOpen] = useState(false);
   const [studioTab, setStudioTab] = useState<StudioTab>("review");
-  const [approvedDiff, setApprovedDiff] = useState(false);
   const [checkpoints, setCheckpoints] = useState<CheckpointRecord[]>(() => loadStored("kiwi.checkpoints", []));
   const [attachments, setAttachments] = useState<AttachmentRecord[]>([]);
   const [rateSummary, setRateSummary] = useState("");
@@ -206,9 +244,12 @@ export default function App() {
   const [openRouterModelsError, setOpenRouterModelsError] = useState("");
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const threadSearchRequestRef = useRef(0);
+  const cancelRequestedRef = useRef(new Set<string>());
+  const permissionControlRef = useRef<HTMLDivElement>(null);
   if (threadProjectBindingsRef.current === null) {
     threadProjectBindingsRef.current = loadStored("kiwi.threadProjects", {});
   }
+  if (knownThreadsRef.current === null) knownThreadsRef.current = initialKnownThreads;
 
   const terminal = useTerminal({ scrollback: settings.terminalScrollback, permission: settings.permission, onError: setError });
 
@@ -220,8 +261,11 @@ export default function App() {
   const chatWorkspace = useMemo<Project | null>(() => chatWorkspacePath ? ({ id: "openkiwi-normal-chats", name: "Chats", path: chatWorkspacePath, isChat: true }) : null, [chatWorkspacePath]);
   const activeWorkspace = workspaceMode === "chat" ? chatWorkspace : activeProject;
   const activeThreadId = activeThread?.id ?? null;
-  const messages = useTaskStore((state) => activeThreadId ? state.tasks[activeThreadId]?.messages ?? EMPTY_MESSAGES : EMPTY_MESSAGES);
-  const activities = useTaskStore((state) => activeThreadId ? state.tasks[activeThreadId]?.activities ?? EMPTY_ACTIVITIES : EMPTY_ACTIVITIES);
+  const timelineEmpty = useTaskStore((state) => {
+    if (!activeThreadId) return true;
+    const task = state.tasks[activeThreadId];
+    return !task || (task.messages.length === 0 && task.activities.length === 0);
+  });
   const diff = useTaskStore((state) => activeThreadId ? state.tasks[activeThreadId]?.diff ?? "" : "");
   const agentRecords = useTaskStore((state) => activeThreadId ? state.tasks[activeThreadId]?.agents ?? EMPTY_AGENTS : EMPTY_AGENTS);
   const tokenUsage = useTaskStore((state) => activeThreadId ? state.tasks[activeThreadId]?.usage ?? null : null);
@@ -235,15 +279,39 @@ export default function App() {
     }
     return earliest;
   });
-  const threadTasks = useTaskStore((state) => state.tasks);
+  const pendingApprovalCount = useTaskStore((state) => {
+    let count = 0;
+    for (const task of Object.values(state.tasks)) count += task.approvals.length;
+    return count;
+  });
   const displayedThreads = useMemo(() => {
     const query = threadSearch.trim().toLowerCase();
     const merged = threads.filter((thread) => `${thread.name ?? ""} ${thread.preview}`.toLowerCase().includes(query));
+    const mergedIds = new Set(merged.map((thread) => thread.id));
     for (const found of searchResults ?? []) {
-      if (!merged.some((thread) => thread.id === found.id)) merged.push(found);
+      if (!mergedIds.has(found.id)) {
+        mergedIds.add(found.id);
+        merged.push(found);
+      }
     }
-    return merged.sort((a, b) => Number(pinnedThreadIds.includes(b.id)) - Number(pinnedThreadIds.includes(a.id)) || b.updatedAt - a.updatedAt);
+    const pinned = new Set(pinnedThreadIds);
+    return merged.sort((a, b) => Number(pinned.has(b.id)) - Number(pinned.has(a.id)) || b.updatedAt - a.updatedAt);
   }, [pinnedThreadIds, searchResults, threadSearch, threads]);
+  // OpenRouter publishes per-token USD pricing — surface the spend estimate
+  // for the active thread instead of discarding the data.
+  const costEstimate = useMemo(() => {
+    if (settings.provider !== "openrouter" || !tokenUsage) return "";
+    const pricing = openRouterModels.find((entry) => entry.id === settings.model)?.pricing;
+    const promptRate = Number(pricing?.prompt ?? NaN);
+    const completionRate = Number(pricing?.completion ?? NaN);
+    if (!Number.isFinite(promptRate) || !Number.isFinite(completionRate)) return "";
+    const cost = tokenUsage.inputTokens * promptRate + tokenUsage.outputTokens * completionRate;
+    if (!Number.isFinite(cost) || cost < 0) return "";
+    return cost >= 0.01 ? `≈ $${cost.toFixed(2)} this thread` : `≈ $${cost.toFixed(4)} this thread`;
+  }, [openRouterModels, settings.model, settings.provider, tokenUsage]);
+
+  // Only offer "Check settings" for failures settings can actually fix.
+  const errorSuggestsSettings = useMemo(() => Boolean(error) && /sign in|api key|openrouter|model|settings|runtime|codex|account/i.test(error ?? ""), [error]);
   const workspaceArchived = useMemo(() => activeWorkspace
     ? archivedThreads.filter((record) => record.path === normalizedProjectPath(activeWorkspace.path))
     : [], [activeWorkspace, archivedThreads]);
@@ -251,6 +319,17 @@ export default function App() {
   const persistSettings = useCallback((next: AppSettings) => {
     setSettings(next);
     storeValue("kiwi.settings", next);
+  }, []);
+
+  // Confirmation statuses like "Stopped" used to persist in the topbar forever.
+  const transientStatusTimerRef = useRef<number | null>(null);
+  const setTransientStatus = useCallback((message: string) => {
+    setStatus(message);
+    if (transientStatusTimerRef.current !== null) window.clearTimeout(transientStatusTimerRef.current);
+    transientStatusTimerRef.current = window.setTimeout(() => {
+      transientStatusTimerRef.current = null;
+      setStatus((current) => current === message ? "Ready" : current);
+    }, 3000);
   }, []);
 
   const openSettings = useCallback((section: SettingsSection = "general") => {
@@ -277,6 +356,18 @@ export default function App() {
     const next = { ...current, [threadId]: projectPath };
     threadProjectBindingsRef.current = next;
     storeValue("kiwi.threadProjects", next);
+  }, []);
+
+  const rememberThread = useCallback((thread: Thread) => {
+    const next = rememberSidebarThread(knownThreadsRef.current ?? {}, thread);
+    knownThreadsRef.current = next;
+    storeValue("kiwi.knownThreads", next);
+  }, []);
+
+  const forgetThread = useCallback((threadId: string) => {
+    const next = forgetSidebarThread(knownThreadsRef.current ?? {}, threadId);
+    knownThreadsRef.current = next;
+    storeValue("kiwi.knownThreads", next);
   }, []);
 
   const checkRuntime = useCallback(async (showSetupWhenMissing = true): Promise<CodexRuntimeStatus> => {
@@ -310,7 +401,11 @@ export default function App() {
     }
   }, []);
 
+  const loadThreadsRequestRef = useRef(0);
   const loadThreads = useCallback(async (project: Project | null) => {
+    // Last-write-wins guard: a slow page loop for a previous workspace must
+    // not overwrite the thread list of the workspace the user switched to.
+    const requestId = ++loadThreadsRequestRef.current;
     if (!project) {
       setThreads([]);
       return;
@@ -320,16 +415,25 @@ export default function App() {
       let cursor: string | null = null;
       for (let page = 0; page < 20; page += 1) {
         const result: { data: Thread[]; nextCursor?: string | null } = await rpc("thread/list", { cwd: project.path, limit: 100, cursor });
+        if (loadThreadsRequestRef.current !== requestId) return;
         allThreads.push(...(result.data ?? []));
         cursor = result.nextCursor ?? null;
         if (!cursor) break;
       }
       const projectPath = normalizedProjectPath(project.path);
-      setThreads(allThreads.filter((thread) => {
+      const runtimeThreads = allThreads.filter((thread) => {
         const boundPath = threadProjectBindingsRef.current?.[thread.id];
         return normalizedProjectPath(boundPath || thread.cwd) === projectPath;
-      }));
+      });
+      const remembered = { ...(knownThreadsRef.current ?? {}) };
+      for (const thread of runtimeThreads) remembered[thread.id] = sidebarThread(thread);
+      knownThreadsRef.current = remembered;
+      storeValue("kiwi.knownThreads", remembered);
+      if (loadThreadsRequestRef.current !== requestId) return;
+      setThreads(reconcileWorkspaceThreads(runtimeThreads, remembered, project.path, threadProjectBindingsRef.current ?? {}));
     } catch (reason) {
+      if (loadThreadsRequestRef.current !== requestId) return;
+      setThreads(reconcileWorkspaceThreads([], knownThreadsRef.current ?? {}, project.path, threadProjectBindingsRef.current ?? {}));
       setError(friendlyError(reason));
     }
   }, []);
@@ -468,7 +572,6 @@ export default function App() {
   }, [settings.permission]);
 
   const refreshDiffFor = useCallback(async (threadId: string, projectPath: string) => {
-    setApprovedDiff(false);
     try {
       const result = await rpc<{ diff: string }>("gitDiffToRemote", { cwd: projectPath });
       useTaskStore.getState().setDiff(threadId, result.diff ?? "");
@@ -496,7 +599,6 @@ export default function App() {
     onStatus: setStatus,
     onError: setError,
     onAuthRequired: () => setAuthRequiredOpen(true),
-    onDiffReset: () => setApprovedDiff(false),
     onRateSummary: setRateSummary,
     onTerminalOutput: terminal.append,
     onAccountUpdated: () => void refreshAccount(),
@@ -504,11 +606,39 @@ export default function App() {
       setError(message);
       setAuthRequiredOpen(true);
     },
+    onProviderToolCompatibilityError: (threadId) => {
+      if (settings.provider === "openrouter") providerRepairThreadsRef.current.add(threadId);
+    },
+    onApprovalRequested: (threadId) => {
+      if (!settings.notificationsEnabled || useTaskStore.getState().activeThreadId === threadId) return;
+      const thread = threads.find((entry) => entry.id === threadId) ?? knownThreadsRef.current?.[threadId];
+      const label = thread?.name || thread?.preview || "A background task";
+      void (async () => {
+        let granted = await isPermissionGranted();
+        if (!granted) granted = (await requestPermission()) === "granted";
+        if (granted) sendNotification({ title: "OpenKiwi needs your approval", body: `“${label}” is waiting for permission to continue.` });
+      })().catch(() => {});
+    },
     onTurnCompleted: (threadId, turn) => {
+      const needsProviderRepair = providerRepairThreadsRef.current.delete(threadId);
       if (turn) {
         setActiveThread((current) => current && current.id === threadId
           ? { ...current, turns: [...(current.turns ?? []).filter((entry) => entry.id !== turn.id), turn] }
           : current);
+      }
+      if (needsProviderRepair) {
+        setStatus("Refreshing OpenRouter");
+        void restartRuntime()
+          .then(() => checkRuntime(false))
+          .then(() => {
+            setStatus("Ready");
+            setError("OpenRouter compatibility was refreshed. Send your message again.");
+          })
+          .catch((reason) => {
+            setStatus("Runtime issue");
+            setError(friendlyError(reason));
+          });
+        return;
       }
       if (settings.notificationsEnabled && useTaskStore.getState().activeThreadId !== threadId) {
         const thread = threads.find((entry) => entry.id === threadId);
@@ -526,7 +656,24 @@ export default function App() {
       }
       const projectPath = threadProjectBindingsRef.current?.[threadId];
       if (projectPath && activeWorkspace && normalizedProjectPath(projectPath) === normalizedProjectPath(activeWorkspace.path)) {
-        void loadThreads(activeWorkspace);
+        // Bump just the finished thread instead of re-paging the entire
+        // thread list from the runtime after every turn.
+        const known = knownThreadsRef.current?.[threadId];
+        if (known) {
+          // Refresh the preview from the latest user message so the sidebar
+          // does not stay frozen on the thread's first optimistic prompt.
+          const taskMessages = useTaskStore.getState().tasks[threadId]?.messages ?? [];
+          const latestUserText = [...taskMessages].reverse().find((message) => message.role === "user")?.text;
+          const updated = {
+            ...known,
+            preview: latestUserText?.slice(0, 140) || known.preview,
+            updatedAt: Math.floor(Date.now() / 1000),
+          };
+          rememberThread(updated);
+          setThreads((current) => upsertThread(current, updated));
+        } else {
+          void loadThreads(activeWorkspace);
+        }
       }
       if (projectPath && !projectPath.includes("normal-chats")) void refreshDiffFor(threadId, projectPath);
     },
@@ -544,32 +691,106 @@ export default function App() {
     void hasOpenRouterKey().then(setOpenRouterReady).catch(() => setOpenRouterReady(false));
   }, [checkRuntime, refreshAccount, refreshModels, refreshOpenRouterModels, refreshUsage]);
 
+  const shortcutStateRef = useRef({ running: false, modalOpen: false, stopTurn: () => {}, newThread: () => {} });
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+      const meta = event.metaKey || event.ctrlKey;
+      if (meta && event.key.toLowerCase() === "k") {
         event.preventDefault();
         setCommandPaletteOpen((open) => !open);
+        return;
+      }
+      if (meta && event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        shortcutStateRef.current.newThread();
+        return;
+      }
+      if (meta && event.key === ",") {
+        event.preventDefault();
+        openSettings();
+        return;
+      }
+      if (event.key === "Escape" && !shortcutStateRef.current.modalOpen && shortcutStateRef.current.running) {
+        // Escape inside a text field (thread rename, search, composer) means
+        // "cancel that edit", never "interrupt the running task".
+        const target = event.target as HTMLElement | null;
+        if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+        event.preventDefault();
+        shortcutStateRef.current.stopTurn();
       }
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [openSettings]);
 
+  // Workspace-change side effects are keyed on the workspace *path* and
+  // runtime availability, with refreshTools read through a ref. Depending on
+  // the callback identities here used to reset the open conversation whenever
+  // an unrelated setting (skills, project pinning) changed.
+  const refreshToolsRef = useRef(refreshTools);
+  refreshToolsRef.current = refreshTools;
+  const workspaceEffectRef = useRef<{ path: string | null; available: boolean } | null>(null);
   useEffect(() => {
-    if (runtimeStatus?.available) {
+    const path = activeWorkspace ? normalizedProjectPath(activeWorkspace.path) : null;
+    const available = Boolean(runtimeStatus?.available);
+    const previous = workspaceEffectRef.current;
+    if (previous && previous.path === path && previous.available === available) return;
+    workspaceEffectRef.current = { path, available };
+    if (available) {
       void loadThreads(activeWorkspace);
     } else {
       setThreads([]);
     }
-    void refreshTools(activeWorkspace);
+    void refreshToolsRef.current(activeWorkspace);
+    if (previous && previous.path === path) return; // Only availability changed — keep the open conversation.
     setActiveThread(null);
     useTaskStore.getState().setActiveThread(null);
     setAttachments([]);
-    setApprovedDiff(false);
     setThreadSearch("");
     setSearchResults(null);
     if (!activeProject) setStudioOpen(false);
-  }, [activeProject, activeWorkspace, loadThreads, refreshTools, runtimeStatus?.available]);
+  }, [activeProject, activeWorkspace, loadThreads, runtimeStatus?.available]);
+
+  // OS files dragged onto the window become attachments. Tauri delivers
+  // native drag-drop through the webview event, not HTML5 DataTransfer.
+  const [dropActive, setDropActive] = useState(false);
+  const addAttachmentPathsRef = useRef<(paths: string[]) => void>(() => {});
+  useEffect(() => {
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    getCurrentWebview().onDragDropEvent((event) => {
+      if (event.payload.type === "over") setDropActive(true);
+      else if (event.payload.type === "drop") {
+        setDropActive(false);
+        addAttachmentPathsRef.current(event.payload.paths);
+      } else setDropActive(false);
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else stop = unlisten;
+    }).catch(() => {
+      // Browser preview without a Tauri host.
+    });
+    return () => {
+      disposed = true;
+      stop?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!permissionOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!permissionControlRef.current?.contains(event.target as Node)) setPermissionOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setPermissionOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, [permissionOpen]);
 
   // Sidebar search also queries the runtime's full-text thread search, so
   // matches are not limited to the loaded name/preview strings.
@@ -638,6 +859,7 @@ export default function App() {
     }
   };
 
+  const selectThreadRequestRef = useRef(0);
   const selectThread = async (thread: Thread) => {
     if (!activeWorkspace) return;
     const projectPath = normalizedProjectPath(activeWorkspace.path);
@@ -646,25 +868,45 @@ export default function App() {
       setError("That thread belongs to a different chat or project and cannot be opened here.");
       return;
     }
+    // Clicking two threads quickly must open the one clicked last, not the
+    // one whose resume RPC happened to finish last.
+    const requestId = ++selectThreadRequestRef.current;
     setError(null);
     setStatus("Loading thread");
     try {
-      const result = await rpc<{ thread: Thread }>("thread/resume", {
-        threadId: thread.id,
-        cwd: activeWorkspace.path,
-        runtimeWorkspaceRoots: [activeWorkspace.path],
-      });
+      const threadProviderSettings = thread.modelProvider.toLowerCase() === "openrouter"
+        ? { ...settings, provider: "openrouter" as const }
+        : settings;
+      const result = await rpc<{ thread: Thread }>("thread/resume", threadResumeParams(
+        threadProviderSettings,
+        thread.id,
+        activeWorkspace.path,
+        {
+          customAgents,
+          modelContextWindow: settings.provider === "openrouter"
+            ? openRouterModels.find((entry) => entry.id === settings.model)?.context_length
+            : undefined,
+        },
+      ));
+      if (selectThreadRequestRef.current !== requestId) return;
       bindThreadToProject(result.thread.id, activeWorkspace.path);
+      rememberThread(result.thread);
       setActiveThread(result.thread);
       const history = timelineFromTurns(result.thread.turns);
       useTaskStore.getState().hydrateTask(result.thread.id, history.messages, history.activities, activeWorkspace.path);
       useTaskStore.getState().setActiveThread(result.thread.id);
       setStatus("Ready");
     } catch (reason) {
+      if (selectThreadRequestRef.current !== requestId) return;
       setError(friendlyError(reason));
       setStatus("Ready");
     }
   };
+
+  const editMessageIntoComposer = useCallback((text: string) => {
+    setDraft(text);
+    requestAnimationFrame(() => composerRef.current?.focus());
+  }, []);
 
   const newThread = () => {
     setActiveThread(null);
@@ -696,17 +938,23 @@ export default function App() {
     }
 
     if (running && activeThread) {
+      const sentAttachments = [...attachments];
       setDraft("");
       setError(null);
-      useTaskStore.getState().appendUserMessage(activeThread.id, { id: `local-${crypto.randomUUID()}`, role: "user", text });
+      const steerMessageId = `local-${crypto.randomUUID()}`;
+      useTaskStore.getState().appendUserMessage(activeThread.id, { id: steerMessageId, role: "user", text });
       try {
         await rpc("turn/steer", {
           threadId: activeThread.id,
-          input: [{ type: "text", text, text_elements: [] }],
+          input: buildTurnInput(text, sentAttachments),
         });
-        setStatus("Direction added");
+        setAttachments((current) => withoutSentAttachments(current, sentAttachments));
+        setTransientStatus("Direction added");
       } catch (reason) {
-        setDraft(text);
+        // The message never reached the runtime — remove the optimistic bubble
+        // so a retry does not duplicate it in the timeline.
+        useTaskStore.getState().removeMessage(activeThread.id, steerMessageId);
+        setDraft((current) => current || text);
         setError(friendlyError(reason));
       }
       return;
@@ -717,40 +965,78 @@ export default function App() {
     setStartingTurn(true);
     setStatus("Starting");
 
+    let startedThreadId: string | undefined;
+    let sentMessageId: string | undefined;
+    const sentAttachments = [...attachments];
     try {
       await ensureSkillRoots();
-      const fileContext = attachments.filter((item) => item.kind === "file").map((item) => `@${item.path}`).join("\n");
-      const input: Array<JsonObject> = [
-        { type: "text", text: fileContext ? `${text}\n\nAttached context:\n${fileContext}` : text, text_elements: [] },
-        ...attachments.filter((item) => item.kind === "image").map((item) => ({ type: "localImage", path: item.path, detail: "auto" })),
-      ];
+      const input = buildTurnInput(text, sentAttachments);
       let threadId = activeThread?.id;
+      startedThreadId = threadId;
       if (!threadId) {
         const result = await rpc<{ thread: Thread }>("thread/start", threadStartParams(settings, activeWorkspace.path, {
           serviceName: activeWorkspace.isChat ? "OpenKiwi Chat" : "OpenKiwi",
           customAgents,
+          modelContextWindow: settings.provider === "openrouter"
+            ? openRouterModels.find((entry) => entry.id === settings.model)?.context_length
+            : undefined,
           interactive: true,
         }));
         const startedThread = optimisticStartedThread(result.thread, text);
         threadId = startedThread.id;
+        startedThreadId = threadId;
         bindThreadToProject(startedThread.id, activeWorkspace.path);
+        rememberThread(startedThread);
         setThreads((current) => upsertThread(current, startedThread));
         setActiveThread(startedThread);
         useTaskStore.getState().ensureTask(startedThread.id, activeWorkspace.path);
         useTaskStore.getState().setActiveThread(startedThread.id);
+      } else if (settings.provider === "openrouter") {
+        // Re-apply the isolated provider config before every subsequent turn.
+        // This repairs a persisted thread after a compatibility refresh.
+        await rpc("thread/resume", {
+          ...threadResumeParams(settings, threadId, activeWorkspace.path, {
+            customAgents,
+            modelContextWindow: openRouterModels.find((entry) => entry.id === settings.model)?.context_length,
+            excludeTurns: true,
+          }),
+          model: settings.model,
+        });
       }
 
+      if (activeThread?.id === threadId) {
+        const updatedThread = { ...activeThread, updatedAt: Math.floor(Date.now() / 1000) };
+        rememberThread(updatedThread);
+        setThreads((current) => upsertThread(current, updatedThread));
+        setActiveThread(updatedThread);
+      }
       useTaskStore.getState().ensureTask(threadId, activeWorkspace.path);
       useTaskStore.getState().setTaskStatus(threadId, "starting");
-      useTaskStore.getState().appendUserMessage(threadId, { id: `local-${crypto.randomUUID()}`, role: "user", text });
+      sentMessageId = `local-${crypto.randomUUID()}`;
+      useTaskStore.getState().appendUserMessage(threadId, { id: sentMessageId, role: "user", text });
 
       const result = await rpc<{ turn: Turn }>("turn/start", turnStartParams(settings, threadId, activeWorkspace.path, input));
       if (result.turn?.id) useTaskStore.getState().setActiveTurn(threadId, result.turn.id);
       setStartingTurn(false);
-      setAttachments([]);
+      setAttachments((current) => withoutSentAttachments(current, sentAttachments));
+      if (cancelRequestedRef.current.delete(threadId)) {
+        // The user pressed stop while the turn was still starting.
+        if (result.turn?.id) await rpc("turn/interrupt", { threadId, turnId: result.turn.id });
+        useTaskStore.getState().setActiveTurn(threadId, undefined);
+        useTaskStore.getState().setTaskStatus(threadId, "interrupted");
+        setTransientStatus("Stopped");
+      }
     } catch (reason) {
       setStartingTurn(false);
-      if (activeThread?.id) useTaskStore.getState().setTaskStatus(activeThread.id, "error", friendlyError(reason));
+      // Use the locally captured thread id: for a brand-new thread the
+      // activeThread closure is still null here, which used to leave the
+      // thread stuck in "starting" forever.
+      if (startedThreadId) {
+        cancelRequestedRef.current.delete(startedThreadId);
+        if (sentMessageId) useTaskStore.getState().removeMessage(startedThreadId, sentMessageId);
+        useTaskStore.getState().setTaskStatus(startedThreadId, "error", friendlyError(reason));
+      }
+      setDraft((current) => current || text);
       setStatus("Ready");
       setError(friendlyError(reason));
     }
@@ -760,7 +1046,10 @@ export default function App() {
     if (!activeThread || !running) return;
     const turnId = useTaskStore.getState().tasks[activeThread.id]?.activeTurnId;
     if (!turnId) {
-      setError("The task is still starting. Try stopping it again in a moment.");
+      // The turn/start RPC is still in flight. Record the intent so
+      // sendMessage interrupts the turn the moment its id is known.
+      cancelRequestedRef.current.add(activeThread.id);
+      setStatus("Stopping");
       return;
     }
     try {
@@ -768,7 +1057,7 @@ export default function App() {
       useTaskStore.getState().setActiveTurn(activeThread.id, undefined);
       useTaskStore.getState().setTaskStatus(activeThread.id, "interrupted");
       setStartingTurn(false);
-      setStatus("Stopped");
+      setTransientStatus("Stopped");
     } catch (reason) {
       setError(friendlyError(reason));
     }
@@ -841,6 +1130,7 @@ export default function App() {
     if (!name || name === thread.name) return;
     try {
       await rpc("thread/name/set", { threadId: thread.id, name });
+      rememberThread({ ...thread, name });
       setThreads((current) => current.map((entry) => entry.id === thread.id ? { ...entry, name } : entry));
       setActiveThread((current) => current?.id === thread.id ? { ...current, name } : current);
     } catch (reason) {
@@ -854,6 +1144,7 @@ export default function App() {
     try {
       await rpc("thread/archive", { threadId: thread.id });
       if (activeThread?.id === thread.id) newThread();
+      forgetThread(thread.id);
       setThreads((current) => current.filter((entry) => entry.id !== thread.id));
       const path = normalizedProjectPath(threadProjectBindingsRef.current?.[thread.id] || thread.cwd);
       persistArchivedThreads((current) => [{ id: thread.id, label, path, archivedAt: Date.now() }, ...current.filter((entry) => entry.id !== thread.id)]);
@@ -877,6 +1168,7 @@ export default function App() {
     try {
       await rpc("thread/delete", { threadId });
       if (activeThread?.id === threadId) newThread();
+      forgetThread(threadId);
       setThreads((current) => current.filter((entry) => entry.id !== threadId));
       persistArchivedThreads((current) => current.filter((entry) => entry.id !== threadId));
       useTaskStore.getState().removeTask(threadId);
@@ -960,10 +1252,18 @@ export default function App() {
         cwd: activeWorkspace?.path,
         runtimeWorkspaceRoots: activeWorkspace ? [activeWorkspace.path] : undefined,
         model: settings.model,
+        modelProvider: settings.provider === "openrouter" ? "openrouter" : undefined,
+        config: threadRuntimeConfig(settings, {
+          customAgents,
+          modelContextWindow: settings.provider === "openrouter"
+            ? openRouterModels.find((entry) => entry.id === settings.model)?.context_length
+            : undefined,
+        }),
         baseInstructions: settings.systemPrompt,
         developerInstructions: "",
       });
       if (activeWorkspace) bindThreadToProject(result.thread.id, activeWorkspace.path);
+      rememberThread(result.thread);
       setActiveThread(result.thread);
       const history = timelineFromTurns(result.thread.turns);
       useTaskStore.getState().hydrateTask(result.thread.id, history.messages, history.activities, activeWorkspace?.path);
@@ -975,8 +1275,10 @@ export default function App() {
 
   const rollbackTurn = async () => {
     if (!activeThread) return;
+    if (!window.confirm("Undo the last turn?\n\nThis permanently removes the latest exchange from the conversation. Files changed by the turn are not reverted.")) return;
     try {
       const result = await rpc<{ thread: Thread }>("thread/rollback", { threadId: activeThread.id, numTurns: 1 });
+      rememberThread(result.thread);
       setActiveThread(result.thread);
       const history = timelineFromTurns(result.thread.turns);
       useTaskStore.getState().hydrateTask(result.thread.id, history.messages, history.activities, activeWorkspace?.path);
@@ -1001,13 +1303,40 @@ export default function App() {
     } catch (reason) { setError(friendlyError(reason)); }
   };
 
+  const addAttachmentPaths = useCallback((paths: string[]) => {
+    if (!paths.length) return;
+    const imagePattern = /\.(png|jpe?g|gif|webp|heic)$/i;
+    setAttachments((current) => [...current, ...paths.filter((path) => !current.some((item) => item.path === path)).map((path) => ({ path, name: basename(path), kind: imagePattern.test(path) ? "image" as const : "file" as const }))]);
+  }, []);
+
+  addAttachmentPathsRef.current = addAttachmentPaths;
+
   const addAttachment = async () => {
     const selected = await open({ multiple: true, directory: false, title: "Add context files or images" });
     if (!selected) return;
-    const paths = Array.isArray(selected) ? selected : [selected];
-    const imagePattern = /\.(png|jpe?g|gif|webp|heic)$/i;
-    setAttachments((current) => [...current, ...paths.filter((path) => !current.some((item) => item.path === path)).map((path) => ({ path, name: basename(path), kind: imagePattern.test(path) ? "image" as const : "file" as const }))]);
+    addAttachmentPaths(Array.isArray(selected) ? selected : [selected]);
   };
+
+  const pasteImages = useCallback(async (items: DataTransferItemList) => {
+    for (const item of Array.from(items)) {
+      if (!item.type.startsWith("image/")) continue;
+      const file = item.getAsFile();
+      if (!file) continue;
+      try {
+        const buffer = new Uint8Array(await file.arrayBuffer());
+        let binary = "";
+        const chunk = 0x8000;
+        for (let offset = 0; offset < buffer.length; offset += chunk) {
+          binary += String.fromCharCode(...buffer.subarray(offset, offset + chunk));
+        }
+        const extension = (item.type.split("/")[1] ?? "png").toLowerCase();
+        const path = await invoke<string>("save_pasted_image", { dataBase64: btoa(binary), extension });
+        setAttachments((current) => current.some((entry) => entry.path === path) ? current : [...current, { path, name: basename(path), kind: "image" }]);
+      } catch (reason) {
+        setError(friendlyError(reason));
+      }
+    }
+  }, []);
 
   const runGitAction = async (action: "status" | "diff" | "stage" | "revert" | "commit" | "comments" | "ci" | "pr") => {
     if (!activeProject) return;
@@ -1038,7 +1367,7 @@ export default function App() {
   const runProjectAction = async (action: ProjectAction) => {
     if (!activeProject) return;
     setStudioTab("terminal");
-    terminal.append(`${terminal.output ? "\n" : ""}$ ${action.command}\n`);
+    terminal.append(`${terminal.outputStore.get() ? "\n" : ""}$ ${action.command}\n`);
     try {
       const result = await executeCommand(["/bin/zsh", "-lc", action.command], activeProject.path);
       terminal.append(`${result.stdout}${result.stderr}\n[exit ${result.exitCode}]\n`);
@@ -1143,6 +1472,13 @@ export default function App() {
       return next;
     });
   }, []);
+
+  shortcutStateRef.current = {
+    running: Boolean(running && activeThread),
+    modalOpen: settingsOpen || commandPaletteOpen || runtimeSetupOpen || authRequiredOpen || Boolean(pendingApproval) || permissionOpen,
+    stopTurn: () => void stopTurn(),
+    newThread,
+  };
 
   useScheduler({
     schedules: scheduledTasks,
@@ -1254,10 +1590,13 @@ export default function App() {
                       autoFocus
                       value={threadNameDraft}
                       onChange={(event) => setThreadNameDraft(event.target.value)}
-                      onBlur={() => setRenamingThreadId(null)}
+                      onBlur={() => void renameThread(thread)}
                       onKeyDown={(event) => {
                         if (event.key === "Enter") void renameThread(thread);
-                        if (event.key === "Escape") setRenamingThreadId(null);
+                        if (event.key === "Escape") {
+                          setThreadNameDraft(thread.name || "");
+                          setRenamingThreadId(null);
+                        }
                       }}
                       aria-label="Thread name"
                     />
@@ -1266,8 +1605,7 @@ export default function App() {
                   <button className="thread-row" onClick={() => void selectThread(thread)}>
                     {pinnedThreadIds.includes(thread.id) ? <Pin size={13} /> : <MessageSquare size={14} />}
                     <span>{thread.name || thread.preview || "Untitled thread"}</span>
-                    {(threadTasks[thread.id]?.status === "running" || threadTasks[thread.id]?.status === "starting") && <LoaderCircle className="spin thread-state" size={11} />}
-                    {threadTasks[thread.id]?.unread && <i className="thread-unread" />}
+                    <ThreadRowBadge threadId={thread.id} />
                   </button>
                 )}
                 <div className="thread-actions">
@@ -1354,6 +1692,13 @@ export default function App() {
 
         {!activeWorkspace ? (
           <section className="welcome-screen">
+            {error && (
+              <div className="error-banner" role="alert">
+                <span>{error}</span>
+                {errorSuggestsSettings && <button className="error-settings" onClick={() => openSettings()}>Check settings</button>}
+                <button onClick={() => setError(null)} aria-label="Dismiss error"><X size={14} /></button>
+              </div>
+            )}
             <div className="welcome-orbit"><Code2 size={34} /></div>
             <h1>Choose how you want to work.</h1>
             <p>Open a project for coding inside a folder, or use a normal chat with no project attached.</p>
@@ -1362,7 +1707,7 @@ export default function App() {
         ) : (
           <>
             <section className="conversation">
-              {!messages.length && !activities.length ? (
+              {timelineEmpty || !activeThreadId ? (
                 <div className="thread-empty-state">
                   <div className={`empty-state-icon ${activeWorkspace.isChat ? "chat" : ""}`}>{activeWorkspace.isChat ? <MessageSquare size={27} /> : <Bot size={27} />}</div>
                   <h1>{activeWorkspace.isChat ? "Start a normal chat." : "What should we build?"}</h1>
@@ -1377,11 +1722,11 @@ export default function App() {
               ) : (
                 <ErrorBoundary label="conversation">
                   <Suspense fallback={<div className="timeline-loading"><LoaderCircle className="spin" size={15} /> Loading conversation…</div>}>
-                    <ChatTimeline
-                      messages={messages}
-                      activities={activities}
+                    <ConversationTimeline
+                      threadId={activeThreadId}
                       running={running}
                       thinkingLabel={activeWorkspace.isChat ? "Thinking in normal chat" : `Working in ${activeProject?.name}`}
+                      onEditMessage={editMessageIntoComposer}
                     />
                   </Suspense>
                 </ErrorBoundary>
@@ -1392,22 +1737,41 @@ export default function App() {
               {error && (
                 <div className="error-banner" role="alert">
                   <span>{error}</span>
-                  <button className="error-settings" onClick={() => openSettings()}>Check settings</button>
+                  {errorSuggestsSettings && <button className="error-settings" onClick={() => openSettings()}>Check settings</button>}
                   <button onClick={() => setError(null)} aria-label="Dismiss error"><X size={14} /></button>
                 </div>
               )}
-              <div className="composer">
+              <div className={`composer ${running && activeThread ? "steering" : ""} ${dropActive ? "drop-target" : ""}`}>
+                {attachments.length > 0 && (
+                  <div className="composer-attachments" aria-label="Attached context">
+                    {attachments.map((item) => (
+                      <span key={item.path} className={item.kind}>
+                        <Paperclip size={10} />
+                        <em title={item.path}>{item.name}</em>
+                        <button onClick={() => setAttachments((current) => current.filter((entry) => entry.path !== item.path))} title={`Remove ${item.name}`} aria-label={`Remove attachment ${item.name}`}><X size={11} /></button>
+                      </span>
+                    ))}
+                  </div>
+                )}
                 <textarea
                   ref={composerRef}
                   value={draft}
                   onChange={(event) => setDraft(event.target.value)}
+                  onPaste={(event) => {
+                    if (Array.from(event.clipboardData.items).some((item) => item.type.startsWith("image/"))) {
+                      event.preventDefault();
+                      void pasteImages(event.clipboardData.items);
+                    }
+                  }}
                   onKeyDown={(event) => {
                     if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
                       event.preventDefault();
                       void sendMessage();
                     }
                   }}
-                  placeholder={activeWorkspace.isChat ? "Ask anything — no project folder attached…" : `Ask OpenKiwi to work in ${activeProject?.name ?? "this project"}…`}
+                  placeholder={running && activeThread
+                    ? "Add direction to the running task…"
+                    : activeWorkspace.isChat ? "Ask anything — no project folder attached…" : `Ask OpenKiwi to work in ${activeProject?.name ?? "this project"}…`}
                   rows={1}
                 />
                 {settings.provider === "openai" && (
@@ -1437,14 +1801,14 @@ export default function App() {
                 )}
                 <div className="composer-toolbar">
                   <div className="composer-controls">
-                    <div className="permission-control">
-                      <button className="toolbar-button" onClick={() => setPermissionOpen((open) => !open)}>
+                    <div className="permission-control" ref={permissionControlRef}>
+                      <button className="toolbar-button" onClick={() => setPermissionOpen((open) => !open)} aria-haspopup="menu" aria-expanded={permissionOpen}>
                         <PermissionIcon mode={settings.permission} />
                         {permissionLabel(settings.permission)}
                         <ChevronDown size={13} />
                       </button>
                       {permissionOpen && (
-                        <div className="permission-menu">
+                        <div className="permission-menu" role="menu" aria-label="Permission mode">
                           {(["read-only", "ask", "full"] as PermissionMode[]).map((mode) => (
                             <button
                               key={mode}
@@ -1484,8 +1848,11 @@ export default function App() {
                     </button>
                   </div>
                   <div className="composer-actions">
+                    {running && activeThread && (
+                      <span className="steer-hint" title="The task is running — Enter sends this message as direction to it, not as a new question.">Steering active task</span>
+                    )}
                     {running && (
-                      <button className="stop-button" onClick={() => void stopTurn()} title="Stop the active task" aria-label="Stop the active task">
+                      <button className="stop-button" onClick={() => void stopTurn()} title="Stop the active task (Esc)" aria-label="Stop the active task">
                         <CircleStop size={17} />
                       </button>
                     )}
@@ -1495,7 +1862,14 @@ export default function App() {
                   </div>
                 </div>
               </div>
-              <div className="composer-caption">OpenKiwi can make mistakes. Review commands and changes before shipping.</div>
+              <div className="composer-caption">
+                OpenKiwi can make mistakes. Review commands and changes before shipping.
+                {tokenUsage?.contextWindow ? (
+                  <span className={`context-meter ${tokenUsage.totalTokens / tokenUsage.contextWindow > 0.8 ? "warn" : ""}`}>
+                    {" "}· Context {Math.min(100, Math.round((tokenUsage.totalTokens / tokenUsage.contextWindow) * 100))}% used{costEstimate ? ` · ${costEstimate}` : ""}
+                  </span>
+                ) : null}
+              </div>
             </section>
           </>
         )}
@@ -1509,14 +1883,14 @@ export default function App() {
           projectPath={activeProject?.path}
           activeThread={Boolean(activeThread)}
           diff={diff}
-          approvedDiff={approvedDiff}
           agents={agentRecords}
-          terminalOutput={terminal.output}
+          terminalOutput={terminal.outputStore}
           terminalCommand={terminal.command}
           terminalRunning={terminal.running}
           checkpoints={checkpoints.filter((item) => !activeThread || item.threadId === activeThread.id)}
           attachments={attachments}
           usage={tokenUsage}
+          costEstimate={costEstimate}
           rateSummary={rateSummary}
           skills={skills}
           mcpServers={mcpServers}
@@ -1538,7 +1912,6 @@ export default function App() {
           onClose={() => setStudioOpen(false)}
           onRefreshDiff={() => void refreshDiff()}
           onReview={() => void startReview()}
-          onApproveDiff={() => setApprovedDiff((approved) => !approved)}
           onOpenAgent={(id) => void openAgent(id)}
           onStopAgent={(id) => void stopAgent(id)}
           onTerminalCommand={terminal.setCommand}
@@ -1594,6 +1967,8 @@ export default function App() {
         skills={skills}
         skillsBusy={skillsBusy}
         skillsError={skillsError}
+        mcpServers={mcpServers}
+        onMcpChanged={() => void refreshTools(activeProject)}
         workspaceToolsAvailable={Boolean(activeProject)}
         onProfiles={(value) => { setPromptProfiles(value); storeValue("kiwi.promptProfiles", value); }}
         onAgents={(value) => { setCustomAgents(value); storeValue("kiwi.customAgents", value); }}
@@ -1622,7 +1997,17 @@ export default function App() {
       />
 
       {pendingApproval && (
-        <ApprovalCenter approval={pendingApproval} onRespond={(result) => void answerApproval(result)} />
+        <ApprovalCenter
+          approval={pendingApproval}
+          threadLabel={(() => {
+            if (pendingApproval.threadId === "runtime") return undefined;
+            const known = knownThreadsRef.current?.[pendingApproval.threadId];
+            const thread = threads.find((entry) => entry.id === pendingApproval.threadId) ?? known;
+            return thread?.name || thread?.preview || `thread ${pendingApproval.threadId.slice(0, 8)}`;
+          })()}
+          pendingCount={pendingApprovalCount - 1}
+          onRespond={(result) => void answerApproval(result)}
+        />
       )}
       <CommandPalette
         open={commandPaletteOpen}

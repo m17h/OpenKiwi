@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { ActivityRow, orderedTimelineEntries } from "./ChatTimeline";
+import { ActivityRow, ReasoningDisclosure, orderedTimelineEntries } from "./ChatTimeline";
 
 describe("ChatTimeline", () => {
   it("places command activity between the messages that surround it", () => {
@@ -26,5 +26,28 @@ describe("ChatTimeline", () => {
     fireEvent.click(toggle);
     expect(toggle).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("working tree clean")).toBeInTheDocument();
+  });
+
+  it("keeps model thinking collapsed by default and reveals it on request", () => {
+    const { container } = render(<ActivityRow activity={{ id: "reasoning", kind: "reasoning", title: "Model thinking", detail: "Considering the available approaches", status: "completed" }} />);
+
+    const toggle = screen.getByRole("button", { name: "Show thinking" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(container.querySelector(".reasoning-panel")).toHaveAttribute("aria-hidden", "true");
+
+    fireEvent.click(toggle);
+    expect(screen.getByRole("button", { name: "Hide thinking" })).toHaveAttribute("aria-expanded", "true");
+    expect(container.querySelector(".reasoning-panel")).toHaveAttribute("aria-hidden", "false");
+    expect(screen.getByText("Considering the available approaches")).toBeInTheDocument();
+  });
+
+  it("streams new thinking into an open disclosure without collapsing it", () => {
+    const { rerender } = render(<ReasoningDisclosure detail="Checking the project" inProgress />);
+    fireEvent.click(screen.getByRole("button", { name: "Show thinking" }));
+
+    rerender(<ReasoningDisclosure detail={"Checking the project\nReading the relevant files"} inProgress />);
+
+    expect(screen.getByRole("button", { name: "Hide thinking" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText(/Reading the relevant files/)).toBeInTheDocument();
   });
 });

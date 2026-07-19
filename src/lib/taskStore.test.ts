@@ -19,6 +19,17 @@ describe("task store", () => {
     expect(state.tasks["thread-b"].unread).toBe(true);
   });
 
+  it("batches reasoning deltas and keeps them separate by thread", () => {
+    const store = useTaskStore.getState();
+    store.queueReasoningDelta("thread-a", "reasoning", "summary", "summary");
+    store.queueReasoningDelta("thread-b", "reasoning", "private ", "content");
+    store.queueReasoningDelta("thread-b", "reasoning", "details", "content");
+    store.flushDeltas();
+
+    expect(useTaskStore.getState().tasks["thread-a"].activities[0].detail).toBe("summary");
+    expect(useTaskStore.getState().tasks["thread-b"].activities[0].detail).toBe("private details");
+  });
+
   it("queues concurrent approvals without replacing them", () => {
     const store = useTaskStore.getState();
     store.enqueueApproval({ id: 1, method: "item/commandExecution/requestApproval", params: {}, threadId: "thread-a", receivedAt: 1 });

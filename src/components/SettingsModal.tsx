@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -28,6 +28,7 @@ import { updateProgress, type AppUpdater } from "../lib/appUpdater";
 import type { LocalSkill } from "../lib/skills";
 import { HarnessSettings } from "./HarnessSettings";
 import { SkillLibrary } from "./SkillLibrary";
+import type { McpView } from "./StudioDock";
 import type {
   Account,
   AppSettings,
@@ -67,6 +68,8 @@ export function SettingsModal({
   skills,
   skillsBusy,
   skillsError,
+  mcpServers,
+  onMcpChanged,
   workspaceToolsAvailable,
   onProfiles,
   onAgents,
@@ -104,6 +107,8 @@ export function SettingsModal({
   skills: LocalSkill[];
   skillsBusy: boolean;
   skillsError: string;
+  mcpServers?: McpView[];
+  onMcpChanged?: () => void;
   workspaceToolsAvailable: boolean;
   onProfiles: (value: PromptProfile[]) => void;
   onAgents: (value: CustomAgentProfile[]) => void;
@@ -121,6 +126,14 @@ export function SettingsModal({
   const [busy, setBusy] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>(initialSection);
 
+  // Buffered edits (theme, prompt, toggles) are discarded on close — warn
+  // before silently throwing away work like a hand-written system prompt.
+  const dirty = open && JSON.stringify(local) !== JSON.stringify(settings);
+  const requestClose = () => {
+    if (dirty && !window.confirm("Discard unsaved settings changes?")) return;
+    onClose();
+  };
+
   useEffect(() => {
     if (open) {
       setLocal(settings);
@@ -135,14 +148,17 @@ export function SettingsModal({
     }
   }, [appUpdater.phase, initialSection, open]);
 
+  const requestCloseRef = useRef(requestClose);
+  requestCloseRef.current = requestClose;
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") requestCloseRef.current();
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [onClose, open]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   const signIn = async () => {
     if (!runtimeStatus?.available) {
@@ -199,11 +215,11 @@ export function SettingsModal({
   };
 
   return (
-    <div className={`modal-backdrop settings-backdrop ${open ? "open" : "closed"}`} onMouseDown={onClose} aria-hidden={!open} inert={!open ? true : undefined}>
+    <div className={`modal-backdrop settings-backdrop ${open ? "open" : "closed"}`} onMouseDown={requestClose} aria-hidden={!open} inert={!open ? true : undefined}>
       <div className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
         <div className="modal-header">
           <div><h2 id="settings-title">Settings</h2><p>Customize OpenKiwi without hidden configuration.</p></div>
-          <button className="icon-button" onClick={onClose} aria-label="Close settings"><X size={18} /></button>
+          <button className="icon-button" onClick={requestClose} aria-label="Close settings"><X size={18} /></button>
         </div>
 
         <div className="settings-layout">
@@ -283,6 +299,8 @@ export function SettingsModal({
             onAgents={onAgents}
             onActions={onActions}
             onSchedules={onSchedules}
+            mcpServers={mcpServers}
+            onMcpChanged={onMcpChanged}
           />}
 
           {settingsSection === "tools" && <div className="settings-workspace-link"><div><strong>Live tool controls</strong><small>{workspaceToolsAvailable ? "Inspect skills, connect configured MCP servers, and run project actions in the active workspace." : "Select a project to inspect live skills, MCP servers, and project actions."}</small></div><button className="secondary-button" onClick={onWorkspaceTools} disabled={!workspaceToolsAvailable}><PanelRight size={13} /> Open workspace tools</button></div>}
@@ -410,7 +428,8 @@ export function SettingsModal({
         </div>
 
         <div className="modal-footer">
-          <button className="secondary-button" onClick={onClose}>Cancel</button>
+          {dirty && <span className="unsaved-hint">Unsaved changes</span>}
+          <button className="secondary-button" onClick={requestClose}>Cancel</button>
           <button className="primary-button" onClick={() => onSave({ ...local, subagentMax: Math.min(24, Math.max(1, local.subagentMax)) })}>Save settings</button>
         </div>
       </div>

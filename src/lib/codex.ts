@@ -37,7 +37,18 @@ export async function respond(id: number | string, result: JsonObject): Promise<
 }
 
 export async function onCodexEvent(handler: (event: CodexEvent) => void): Promise<UnlistenFn> {
-  return listen<CodexEvent>("codex-event", ({ payload }) => handler(payload));
+  // The backend emits single messages on "codex-event" and coalesced bursts of
+  // delta notifications on "codex-events" as an ordered array.
+  const [single, batched] = await Promise.all([
+    listen<CodexEvent>("codex-event", ({ payload }) => handler(payload)),
+    listen<CodexEvent[]>("codex-events", ({ payload }) => {
+      for (const event of payload) handler(event);
+    }),
+  ]);
+  return () => {
+    single();
+    batched();
+  };
 }
 
 export async function saveOpenRouterKey(apiKey: string): Promise<void> {

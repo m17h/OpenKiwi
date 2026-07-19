@@ -5,6 +5,7 @@ export const DURABLE_STORAGE_KEYS = [
   "kiwi.workspaceMode",
   "kiwi.settings",
   "kiwi.threadProjects",
+  "kiwi.knownThreads",
   "kiwi.checkpoints",
   "kiwi.promptProfiles",
   "kiwi.customAgents",
@@ -27,7 +28,12 @@ export function loadStored<T>(key: string, fallback: T): T {
 }
 
 export function storeValue<T>(key: string, value: T): void {
-  localStorage.setItem(key, JSON.stringify(value));
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Quota or privacy-mode failures must not abort the calling flow;
+    // the SQLite mirror below still persists the value on desktop builds.
+  }
   void invoke("state_write", { key, value }).catch(() => {
     // Browser previews and tests do not have a Tauri host. localStorage remains
     // the safe fallback while desktop builds persist the same value in SQLite.
