@@ -177,17 +177,23 @@ export function routeCodexEvent(event: CodexEvent, ctx: CodexEventContext): void
     return;
   }
   if (method === "turn/started") {
-    useTaskStore.getState().setTaskStatus(eventThreadId, "running");
+    const taskStore = useTaskStore.getState();
+    const turn = params.turn && typeof params.turn === "object" ? (params.turn as unknown as Turn) : null;
+    if (turn?.id) taskStore.setActiveTurn(eventThreadId, turn.id);
+    taskStore.setTaskStatus(eventThreadId, "running");
     ctx.audit("turn.started", {}, eventThreadId);
     if (useTaskStore.getState().activeThreadId === eventThreadId) ctx.onStatus("Working");
     return;
   }
   if (method === "turn/completed") {
-    useTaskStore.getState().setTaskStatus(eventThreadId, "completed");
-    ctx.audit("turn.completed", {}, eventThreadId);
+    const taskStore = useTaskStore.getState();
     const turn = params.turn && typeof params.turn === "object" ? (params.turn as unknown as Turn) : null;
+    const nextStatus = turn?.status === "interrupted" ? "interrupted" : turn?.status === "failed" ? "error" : "completed";
+    taskStore.setActiveTurn(eventThreadId, undefined);
+    taskStore.setTaskStatus(eventThreadId, nextStatus);
+    ctx.audit("turn.completed", {}, eventThreadId);
     ctx.onTurnCompleted(eventThreadId, turn);
-    if (useTaskStore.getState().activeThreadId === eventThreadId) ctx.onStatus("Ready");
+    if (useTaskStore.getState().activeThreadId === eventThreadId) ctx.onStatus(nextStatus === "interrupted" ? "Stopped" : nextStatus === "error" ? "Task failed" : "Ready");
     return;
   }
   if (method === "thread/status/changed") {

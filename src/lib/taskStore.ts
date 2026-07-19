@@ -6,6 +6,7 @@ export type TaskStatus = "idle" | "starting" | "running" | "completed" | "interr
 
 export interface ThreadTaskState {
   threadId: string;
+  activeTurnId?: string;
   workspacePath?: string;
   status: TaskStatus;
   messages: ChatMessage[];
@@ -31,6 +32,7 @@ interface TaskStoreState {
   flushDeltas: () => void;
   completeMessage: (threadId: string, message: ChatMessage) => void;
   upsertActivity: (threadId: string, activity: Activity) => void;
+  setActiveTurn: (threadId: string, turnId?: string) => void;
   setTaskStatus: (threadId: string, status: TaskStatus, error?: string) => void;
   setDiff: (threadId: string, diff: string) => void;
   setUsage: (threadId: string, usage: TokenUsageView | null) => void;
@@ -164,6 +166,10 @@ export const useTaskStore = create<TaskStoreState>((set, get) => ({
       ? task.activities.map((entry) => entry.id === activity.id ? { ...activity, timelineOrder: entry.timelineOrder } : entry)
       : [...task.activities, withTimelineOrder(activity)];
     return { tasks: { ...state.tasks, [threadId]: { ...task, activities, unread: state.activeThreadId !== threadId, updatedAt: Date.now() } } };
+  }),
+  setActiveTurn: (threadId, turnId) => set((state) => {
+    const task = state.tasks[threadId] ?? emptyTask(threadId);
+    return { tasks: { ...state.tasks, [threadId]: { ...task, activeTurnId: turnId, updatedAt: Date.now() } } };
   }),
   setTaskStatus: (threadId, status, error) => set((state) => {
     const task = state.tasks[threadId] ?? emptyTask(threadId);

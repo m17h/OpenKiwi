@@ -36,6 +36,16 @@ describe("task store", () => {
     expect(useTaskStore.getState().statuses).toEqual({ "thread-a": "running", "thread-b": "completed" });
   });
 
+  it("tracks the active runtime turn independently for each thread", () => {
+    const store = useTaskStore.getState();
+    store.setActiveTurn("thread-a", "turn-a");
+    store.setActiveTurn("thread-b", "turn-b");
+    store.setActiveTurn("thread-a", undefined);
+
+    expect(useTaskStore.getState().tasks["thread-a"].activeTurnId).toBeUndefined();
+    expect(useTaskStore.getState().tasks["thread-b"].activeTurnId).toBe("turn-b");
+  });
+
   it("assigns chronology once and preserves it when activity completes", () => {
     const store = useTaskStore.getState();
     store.appendUserMessage("thread-a", { id: "user", role: "user", text: "Check it" });

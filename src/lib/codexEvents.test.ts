@@ -60,15 +60,17 @@ describe("routeCodexEvent", () => {
   it("marks turn lifecycle and only reports status for the active thread", () => {
     const ctx = makeContext();
     useTaskStore.getState().setActiveThread("thread-a");
-    routeCodexEvent({ method: "turn/started", params: { threadId: "thread-b" } }, ctx);
+    routeCodexEvent({ method: "turn/started", params: { threadId: "thread-b", turn: { id: "turn-b", items: [] } } }, ctx);
     expect(useTaskStore.getState().statuses["thread-b"]).toBe("running");
+    expect(useTaskStore.getState().tasks["thread-b"].activeTurnId).toBe("turn-b");
     expect(ctx.onStatus).not.toHaveBeenCalled();
 
-    routeCodexEvent({ method: "turn/started", params: { threadId: "thread-a" } }, ctx);
+    routeCodexEvent({ method: "turn/started", params: { threadId: "thread-a", turn: { id: "turn-a", items: [] } } }, ctx);
     expect(ctx.onStatus).toHaveBeenCalledWith("Working");
 
     routeCodexEvent({ method: "turn/completed", params: { threadId: "thread-b", turn: { id: "t1", items: [] } } }, ctx);
     expect(useTaskStore.getState().statuses["thread-b"]).toBe("completed");
+    expect(useTaskStore.getState().tasks["thread-b"].activeTurnId).toBeUndefined();
     expect(ctx.onTurnCompleted).toHaveBeenCalledWith("thread-b", { id: "t1", items: [] });
   });
 
@@ -77,6 +79,18 @@ describe("routeCodexEvent", () => {
     routeCodexEvent({ stream: "stderr", line: "request failed: 401 Unauthorized" }, ctx);
     expect(ctx.onAuthRequired).toHaveBeenCalled();
     expect(ctx.onStatus).toHaveBeenCalledWith("Sign-in required");
+  });
+
+  it("preserves an interrupted turn as stopped when its completion event arrives", () => {
+    const ctx = makeContext();
+    useTaskStore.getState().setActiveThread("thread-a");
+    useTaskStore.getState().setActiveTurn("thread-a", "turn-a");
+
+    routeCodexEvent({ method: "turn/completed", params: { threadId: "thread-a", turn: { id: "turn-a", items: [], status: "interrupted" } } }, ctx);
+
+    expect(useTaskStore.getState().statuses["thread-a"]).toBe("interrupted");
+    expect(useTaskStore.getState().tasks["thread-a"].activeTurnId).toBeUndefined();
+    expect(ctx.onStatus).toHaveBeenCalledWith("Stopped");
   });
 
   it("decodes terminal output deltas", () => {

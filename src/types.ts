@@ -28,6 +28,7 @@ export interface Thread {
 export interface Turn {
   id: string;
   items: ThreadItem[];
+  status?: "completed" | "interrupted" | "failed" | "inProgress";
 }
 
 export interface ThreadItem {

@@ -83,6 +83,7 @@ import type {
   PromptProfile,
   ScheduledTask,
   Thread,
+  Turn,
   ThemeName,
   WorkspaceMode,
 } from "./types";
@@ -743,7 +744,8 @@ export default function App() {
       useTaskStore.getState().setTaskStatus(threadId, "starting");
       useTaskStore.getState().appendUserMessage(threadId, { id: `local-${crypto.randomUUID()}`, role: "user", text });
 
-      await rpc("turn/start", turnStartParams(settings, threadId, activeWorkspace.path, input));
+      const result = await rpc<{ turn: Turn }>("turn/start", turnStartParams(settings, threadId, activeWorkspace.path, input));
+      if (result.turn?.id) useTaskStore.getState().setActiveTurn(threadId, result.turn.id);
       setStartingTurn(false);
       setAttachments([]);
     } catch (reason) {
@@ -756,8 +758,14 @@ export default function App() {
 
   const stopTurn = async () => {
     if (!activeThread || !running) return;
+    const turnId = useTaskStore.getState().tasks[activeThread.id]?.activeTurnId;
+    if (!turnId) {
+      setError("The task is still starting. Try stopping it again in a moment.");
+      return;
+    }
     try {
-      await rpc("turn/interrupt", { threadId: activeThread.id });
+      await rpc("turn/interrupt", { threadId: activeThread.id, turnId });
+      useTaskStore.getState().setActiveTurn(activeThread.id, undefined);
       useTaskStore.getState().setTaskStatus(activeThread.id, "interrupted");
       setStartingTurn(false);
       setStatus("Stopped");
@@ -916,8 +924,14 @@ export default function App() {
   };
 
   const stopAgent = async (threadId: string) => {
+    const turnId = useTaskStore.getState().tasks[threadId]?.activeTurnId;
+    if (!turnId) {
+      setError("That sub-agent does not have an active task to stop.");
+      return;
+    }
     try {
-      await rpc("turn/interrupt", { threadId });
+      await rpc("turn/interrupt", { threadId, turnId });
+      useTaskStore.getState().setActiveTurn(threadId, undefined);
       useTaskStore.getState().setTaskStatus(threadId, "interrupted");
       if (activeThreadId) useTaskStore.getState().upsertAgent(activeThreadId, { id: threadId, prompt: "Delegated task", status: "interrupted" });
     } catch (reason) { setError(friendlyError(reason)); }
@@ -1469,14 +1483,16 @@ export default function App() {
                       {attachments.length ? attachments.length : "Attach"}
                     </button>
                   </div>
-                  {running && (
-                    <button className="stop-button" onClick={() => void stopTurn()} title="Stop the active task">
-                      <CircleStop size={17} />
+                  <div className="composer-actions">
+                    {running && (
+                      <button className="stop-button" onClick={() => void stopTurn()} title="Stop the active task" aria-label="Stop the active task">
+                        <CircleStop size={17} />
+                      </button>
+                    )}
+                    <button className="send-button" onClick={() => void sendMessage()} disabled={!draft.trim()} title={running ? "Add direction to the active task" : "Send"}>
+                      {running ? <ArrowUp size={17} /> : <ArrowUp size={18} />}
                     </button>
-                  )}
-                  <button className="send-button" onClick={() => void sendMessage()} disabled={!draft.trim()} title={running ? "Add direction to the active task" : "Send"}>
-                    {running ? <ArrowUp size={17} /> : <ArrowUp size={18} />}
-                  </button>
+                  </div>
                 </div>
               </div>
               <div className="composer-caption">OpenKiwi can make mistakes. Review commands and changes before shipping.</div>
