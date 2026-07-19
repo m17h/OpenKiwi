@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { ActivityRow, ReasoningDisclosure, orderedTimelineEntries } from "./ChatTimeline";
+import { ActivityRow, CommandDisclosure, ReasoningDisclosure, orderedTimelineEntries } from "./ChatTimeline";
 
 describe("ChatTimeline", () => {
   it("places command activity between the messages that surround it", () => {
@@ -12,20 +12,53 @@ describe("ChatTimeline", () => {
       [{ id: "command", kind: "command", title: "git status", detail: "clean", timelineOrder: 2 }],
     );
 
-    expect(entries.map((entry) => entry.kind === "thinking" ? "thinking" : entry.value.id))
+    expect(entries.map((entry) => entry.kind === "thinking"
+      ? "thinking"
+      : entry.kind === "commands"
+        ? entry.value.map((command) => command.id).join(",")
+        : entry.value.id))
       .toEqual(["user", "command", "assistant"]);
   });
 
-  it("keeps command output collapsed until the user opens it", () => {
-    render(<ActivityRow activity={{ id: "command", kind: "command", title: "git status", detail: "working tree clean", status: "completed" }} />);
+  it("groups consecutive commands but preserves surrounding timeline order", () => {
+    const entries = orderedTimelineEntries(
+      [{ id: "user", role: "user", text: "Check it", timelineOrder: 1 }],
+      [
+        { id: "one", kind: "command", title: "git status", timelineOrder: 2 },
+        { id: "two", kind: "command", title: "npm test", timelineOrder: 3 },
+        { id: "file", kind: "file", title: "Changed app.ts", timelineOrder: 4 },
+        { id: "three", kind: "command", title: "npm build", timelineOrder: 5 },
+      ],
+    );
 
-    const toggle = screen.getByRole("button", { name: "git status" });
+    expect(entries.map((entry) => entry.kind === "commands" ? entry.value.map((command) => command.id).join(",") : entry.kind))
+      .toEqual(["message", "one,two", "activity", "three"]);
+  });
+
+  it("keeps grouped commands collapsed until the user opens them", () => {
+    render(<CommandDisclosure commands={[
+      { id: "status", kind: "command", title: "git status", detail: "working tree clean", status: "completed" },
+      { id: "tests", kind: "command", title: "npm test", detail: "all tests passed", status: "completed" },
+    ]} />);
+
+    const toggle = screen.getByRole("button", { name: "Show 2 executed commands" });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByText("working tree clean")).not.toBeInTheDocument();
+    expect(screen.getByText("Executed 2 commands")).toBeInTheDocument();
+    expect(screen.getByText("working tree clean")).toBeInTheDocument();
+    expect(screen.getByText("working tree clean").closest(".command-panel")).toHaveAttribute("aria-hidden", "true");
 
     fireEvent.click(toggle);
     expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByText("working tree clean")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Hide 2 executed commands" })).toBeInTheDocument();
+    expect(screen.getByText("working tree clean").closest(".command-panel")).toHaveAttribute("aria-hidden", "false");
+    expect(screen.getByText("all tests passed")).toBeInTheDocument();
+  });
+
+  it("uses singular command copy", () => {
+    render(<CommandDisclosure commands={[
+      { id: "status", kind: "command", title: "git status", status: "completed" },
+    ]} />);
+    expect(screen.getByText("Executed 1 command")).toBeInTheDocument();
   });
 
   it("keeps model thinking collapsed by default and reveals it on request", () => {

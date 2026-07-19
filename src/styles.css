@@ -307,6 +307,16 @@ button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px
 .reasoning-text strong { color: #a5abb0; font-weight: 600; }
 .reasoning-text code:not(pre code) { color: #a8c993; }
 .reasoning-text pre { overflow: auto; margin: 6px 0; padding: 7px 9px; border-radius: 5px; color: #92999e; background: rgba(255,255,255,.025); font: 10px/1.5 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; }
+.command-list { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 3px 7px; padding: 5px 0 5px 11px; border-left: 1px solid rgba(155,162,167,.16); }
+.command-list-item { min-width: 0; padding: 7px 8px; border: 1px solid var(--line); border-radius: 7px; background: rgba(255,255,255,.018); }
+.command-list-title { min-width: 0; display: flex; align-items: center; gap: 6px; color: #8f969b; }
+.command-list-title svg { flex: 0 0 auto; color: #747c82; }
+.command-list-title code { min-width: 0; flex: 1; overflow: hidden; color: #abb1b5; font: 10.5px/1.45 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; white-space: nowrap; text-overflow: ellipsis; }
+.command-list-title small { flex: 0 0 auto; color: var(--muted-2); font-size: 8.5px; }
+.command-list-item pre { max-height: 150px; overflow: auto; margin: 7px 0 0; padding: 7px 8px; border-radius: 5px; color: #858c92; background: rgba(0,0,0,.2); font: 9.5px/1.45 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; white-space: pre-wrap; }
+.app-shell[data-theme="daylight"] .command-list-item { background: rgba(0,0,0,.018); }
+.app-shell[data-theme="daylight"] .command-list-title code { color: #4c544c; }
+.app-shell[data-theme="daylight"] .command-list-item pre { color: #5a635a; background: rgba(0,0,0,.05); }
 
 @keyframes reasoning-pulse { 0%, 100% { opacity: .35; transform: scale(.8); } 50% { opacity: 1; transform: scale(1); } }
 @media (prefers-reduced-motion: reduce) {
@@ -703,7 +713,7 @@ button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px
 /* Workspace studio */
 .studio-toggle.active { color: var(--green); background: var(--green-soft); }
 .studio-toggle:disabled { opacity: .32; cursor: default; }
-.studio-dock { position: relative; flex: 0 0 var(--dock-width, 430px); width: var(--dock-width, 430px); min-width: 0; overflow: hidden; display: grid; grid-template-columns: 56px minmax(0,1fr); border-left: 1px solid var(--line); background: #101215; box-shadow: -18px 0 45px rgba(0,0,0,.17); opacity: 1; transform: translateX(0); will-change: width, flex-basis, opacity, transform; transition: opacity 190ms ease, transform 280ms cubic-bezier(.22,.8,.25,1), border-color 180ms ease, box-shadow 180ms ease; }
+.studio-dock { position: relative; flex: 0 0 var(--dock-width, 430px); width: var(--dock-width, 430px); min-width: 0; overflow: hidden; display: grid; grid-template-columns: 56px minmax(0,1fr); border-left: 1px solid var(--line); background: #101215; box-shadow: -18px 0 45px rgba(0,0,0,.17); opacity: 1; transform: translateX(0); will-change: width, flex-basis, opacity, transform; transition: flex-basis 280ms cubic-bezier(.22,.8,.25,1), width 280ms cubic-bezier(.22,.8,.25,1), opacity 190ms ease, transform 280ms cubic-bezier(.22,.8,.25,1), border-color 180ms ease, box-shadow 180ms ease; }
 .studio-dock.closed { flex-basis: 0; width: 0; border-left-color: transparent; box-shadow: none; opacity: 0; transform: translateX(28px); pointer-events: none; }
 .studio-tabs { min-width: 56px; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 9px 6px; border-right: 1px solid var(--line); background: #0d0f11; }
 .studio-tabs button { width: 44px; height: 45px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; padding: 0; border: 0; border-radius: 8px; color: #596067; background: transparent; cursor: pointer; }
@@ -872,6 +882,10 @@ button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px
   .studio-dock.closed { width: min(var(--dock-width, 430px), 92vw); opacity: 0; transform: translateX(104%); }
   .studio-panel { width: auto; min-width: 0; }
   .model-power-control { grid-template-columns: minmax(210px,.9fr) minmax(190px,1fr) 62px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .studio-dock { transition: none; }
 }
 
 @media (max-width: 760px) {

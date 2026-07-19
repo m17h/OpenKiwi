@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Bot,
   Boxes,
@@ -65,6 +65,8 @@ export interface TokenUsageView {
 
 export interface SkillView { name: string; description?: string; path: string; enabled?: boolean }
 export interface McpView { name: string; status: string; tools: number }
+
+export const STUDIO_DOCK_EXIT_MS = 320;
 
 const TABS: Array<{ id: StudioTab; label: string; icon: typeof CodeXml }> = [
   { id: "files", label: "Files", icon: FilePlus2 },
@@ -135,8 +137,21 @@ export function StudioDock(props: {
   onToggleSkill: (path: string) => void;
   onConnectMcp: (server: McpView) => void;
 }) {
+  // Keep the expensive panel contents mounted just long enough for the close
+  // transition to play. Previously the closed branch removed them in the same
+  // render that added `.closed`, so opacity/transform had nothing to animate.
+  const [contentMounted, setContentMounted] = useState(props.open);
+  useEffect(() => {
+    if (props.open) {
+      setContentMounted(true);
+      return;
+    }
+    const timer = window.setTimeout(() => setContentMounted(false), STUDIO_DOCK_EXIT_MS);
+    return () => window.clearTimeout(timer);
+  }, [props.open]);
+  const renderContent = props.open || contentMounted;
   const diffSections = useMemo(() => {
-    if (!props.diff) return [];
+    if (!renderContent || !props.diff) return [];
     const sections: Array<{ path: string; text: string; additions: number; deletions: number }> = [];
     let current: { path: string; lines: string[]; additions: number; deletions: number } | null = null;
     const push = () => {
@@ -154,12 +169,12 @@ export function StudioDock(props: {
     }
     push();
     return sections;
-  }, [props.diff]);
+  }, [props.diff, renderContent]);
   const diffFiles = useMemo(() => diffSections.map((section) => section.path), [diffSections]);
   // When the dock is closed, skip all panel work (diff parsing, xterm,
   // file browser) — it re-rendered fully even while hidden.
-  if (!props.open) {
-    return <aside className="studio-dock closed" aria-label="Project workspace tools" aria-hidden inert />;
+  if (!renderContent) {
+    return <aside className="studio-dock closed" style={props.width ? { "--dock-width": `${props.width}px` } as React.CSSProperties : undefined} aria-label="Project workspace tools" aria-hidden inert />;
   }
   return (
     <aside className={`studio-dock ${props.open ? "open" : "closed"}`} style={props.width ? { "--dock-width": `${props.width}px` } as React.CSSProperties : undefined} aria-label="Project workspace tools" aria-hidden={!props.open} inert={!props.open ? true : undefined}>

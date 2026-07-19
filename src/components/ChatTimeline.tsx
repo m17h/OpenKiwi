@@ -11,12 +11,28 @@ import { InlineApprovalCard } from "./ApprovalCenter";
 type TimelineEntry =
   | { kind: "message"; value: ChatMessage }
   | { kind: "activity"; value: Activity }
+  | { kind: "commands"; value: Activity[] }
   | { kind: "thinking"; label: string }
   | { kind: "approval"; value: PendingApproval };
 
 function entryOrder(entry: TimelineEntry): number {
   if (entry.kind === "thinking" || entry.kind === "approval") return Number.MAX_SAFE_INTEGER;
+  if (entry.kind === "commands") return entry.value[0]?.timelineOrder ?? Number.MAX_SAFE_INTEGER;
   return entry.value.timelineOrder ?? Number.MAX_SAFE_INTEGER;
+}
+
+function groupCommandRuns(entries: TimelineEntry[]): TimelineEntry[] {
+  const grouped: TimelineEntry[] = [];
+  for (const entry of entries) {
+    if (entry.kind !== "activity" || entry.value.kind !== "command") {
+      grouped.push(entry);
+      continue;
+    }
+    const previous = grouped.at(-1);
+    if (previous?.kind === "commands") previous.value.push(entry.value);
+    else grouped.push({ kind: "commands", value: [entry.value] });
+  }
+  return grouped;
 }
 
 export function orderedTimelineEntries(messages: ChatMessage[], activities: Activity[]): TimelineEntry[] {
@@ -44,7 +60,7 @@ export function orderedTimelineEntries(messages: ChatMessage[], activities: Acti
     previousOrder = Math.max(previousOrder, order);
     entries.push(next);
   }
-  return sorted ? entries : entries.sort((left, right) => entryOrder(left) - entryOrder(right));
+  return groupCommandRuns(sorted ? entries : entries.sort((left, right) => entryOrder(left) - entryOrder(right)));
 }
 
 function textFromCodeNode(node: ReactNode): string {
@@ -198,6 +214,44 @@ export const ReasoningDisclosure = memo(function ReasoningDisclosure({
   );
 });
 
+export const CommandDisclosure = memo(function CommandDisclosure({ commands }: { commands: Activity[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const count = commands.length;
+  const inProgress = commands.some((command) => command.status === "inProgress");
+  const label = `Executed ${count} ${count === 1 ? "command" : "commands"}`;
+  return (
+    <div className={`reasoning-disclosure command-disclosure ${expanded ? "expanded" : "collapsed"} ${inProgress ? "active" : "complete"}`}>
+      <button
+        type="button"
+        className="reasoning-toggle command-toggle"
+        onClick={() => setExpanded((value) => !value)}
+        aria-expanded={expanded}
+        aria-label={`${expanded ? "Hide" : "Show"} ${count} executed ${count === 1 ? "command" : "commands"}`}
+      >
+        <ChevronRight className="reasoning-chevron" size={13} />
+        <span>{label}</span>
+        {inProgress && <i className="reasoning-live-dot" aria-label="Command in progress" />}
+      </button>
+      <div className="reasoning-panel command-panel" aria-hidden={!expanded}>
+        <div className="reasoning-panel-inner">
+          <div className="command-list">
+            {commands.map((command) => (
+              <div className="command-list-item" key={command.id}>
+                <div className="command-list-title">
+                  <TerminalSquare size={12} />
+                  <code>{command.title}</code>
+                  {command.status && <small>{command.status}</small>}
+                </div>
+                {command.detail && <pre>{command.detail.slice(-1200)}</pre>}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+});
+
 function TimelineFooter() {
   return <div className="timeline-bottom-space" aria-hidden="true" />;
 }
@@ -258,6 +312,8 @@ export function ChatTimeline({
         ? entry.value.text
         : entry.kind === "activity"
           ? `${entry.value.title} ${entry.value.detail ?? ""}`
+          : entry.kind === "commands"
+            ? entry.value.map((command) => `${command.title} ${command.detail ?? ""}`).join(" ")
           : "";
       if (haystack.toLowerCase().includes(query)) hits.push(index);
     });
@@ -281,7 +337,11 @@ export function ChatTimeline({
       components={VIRTUOSO_COMPONENTS}
       followOutput={(atBottom) => atBottom ? "smooth" : false}
       increaseViewportBy={{ top: 500, bottom: 800 }}
-      computeItemKey={(index, entry) => entry.kind === "thinking" ? `thinking-${index}` : `${entry.kind}-${entry.value.id}`}
+      computeItemKey={(index, entry) => entry.kind === "thinking"
+        ? `thinking-${index}`
+        : entry.kind === "commands"
+          ? `commands-${entry.value.map((command) => command.id).join("-")}`
+          : `${entry.kind}-${entry.value.id}`}
       itemContent={(index, entry) => {
         const hitClass = index === activeEntryIndex ? " search-hit" : "";
         if (entry.kind === "message") {
@@ -289,6 +349,9 @@ export function ChatTimeline({
         }
         if (entry.kind === "activity") {
           return <div className={`timeline-entry${hitClass}`}><ActivityRow activity={entry.value} /></div>;
+        }
+        if (entry.kind === "commands") {
+          return <div className={`timeline-entry${hitClass}`}><CommandDisclosure commands={entry.value} /></div>;
         }
         if (entry.kind === "approval") {
           return (
