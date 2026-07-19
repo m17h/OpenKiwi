@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export const DURABLE_STORAGE_KEYS = [
+  "kiwi.schemaVersion",
   "kiwi.projects",
   "kiwi.workspaceMode",
   "kiwi.settings",
@@ -16,7 +17,26 @@ export const DURABLE_STORAGE_KEYS = [
   "kiwi.skillsFolder",
   "kiwi.skillAliases",
   "kiwi.disabledSkills",
+  "kiwi.drafts",
+  "kiwi.scheduleRuns",
+  "kiwi.costLedger",
+  "kiwi.paneSizes",
 ] as const;
+
+/**
+ * Bump when any kiwi.* value changes shape, and add a corresponding step in
+ * migrateStorage. Old installs then upgrade their data instead of loading
+ * garbage into the new code.
+ */
+export const STORAGE_SCHEMA_VERSION = 1;
+
+export function migrateStorage(): void {
+  const stored = loadStored<number>("kiwi.schemaVersion", 0);
+  if (stored >= STORAGE_SCHEMA_VERSION) return;
+  // Future migrations run in order:
+  // if (stored < 2) { ...rewrite the affected keys... }
+  storeValue("kiwi.schemaVersion", STORAGE_SCHEMA_VERSION);
+}
 
 export function loadStored<T>(key: string, fallback: T): T {
   try {
@@ -34,7 +54,7 @@ export function storeValue<T>(key: string, value: T): void {
     // Quota or privacy-mode failures must not abort the calling flow;
     // the SQLite mirror below still persists the value on desktop builds.
   }
-  void invoke("state_write", { key, value }).catch(() => {
+  void Promise.resolve(invoke("state_write", { key, value })).catch(() => {
     // Browser previews and tests do not have a Tauri host. localStorage remains
     // the safe fallback while desktop builds persist the same value in SQLite.
   });
@@ -60,4 +80,5 @@ export async function hydrateNativeStorage(
       }
     }),
   );
+  migrateStorage();
 }

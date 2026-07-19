@@ -12,8 +12,20 @@ export function sidebarThread(thread: Thread): Thread {
   return summary;
 }
 
+/** The remembered index is rewritten on every turn — keep it bounded. */
+export const MAX_REMEMBERED_THREADS = 500;
+
+export function pruneSidebarIndex(index: ThreadSidebarIndex, max = MAX_REMEMBERED_THREADS): ThreadSidebarIndex {
+  const entries = Object.values(index);
+  if (entries.length <= max) return index;
+  const kept = entries.sort((left, right) => right.updatedAt - left.updatedAt).slice(0, max);
+  const next: ThreadSidebarIndex = {};
+  for (const thread of kept) next[thread.id] = thread;
+  return next;
+}
+
 export function rememberSidebarThread(index: ThreadSidebarIndex, thread: Thread): ThreadSidebarIndex {
-  return { ...index, [thread.id]: sidebarThread(thread) };
+  return pruneSidebarIndex({ ...index, [thread.id]: sidebarThread(thread) });
 }
 
 export function forgetSidebarThread(index: ThreadSidebarIndex, threadId: string): ThreadSidebarIndex {

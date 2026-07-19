@@ -891,6 +891,77 @@ async fn audit_append(
     .map_err(|error| format!("Audit write task failed: {error}"))?
 }
 
+/// A `kind` prefix is only safe inside a LIKE pattern when it is restricted
+/// to the characters audit kinds actually use. `%` is rejected here; `_` is
+/// allowed but escaped in the query so it cannot act as a wildcard.
+fn valid_audit_kind_prefix(prefix: &str) -> bool {
+    !prefix.is_empty()
+        && prefix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+#[tauri::command]
+async fn audit_recent(
+    app: AppHandle,
+    limit: Option<u32>,
+    kind_prefix: Option<String>,
+) -> Result<Vec<Value>, String> {
+    let limit = limit.unwrap_or(50).clamp(1, 500);
+    let kind_prefix = match kind_prefix.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(prefix) if valid_audit_kind_prefix(prefix) => Some(prefix.to_string()),
+        Some(_) => {
+            return Err(
+                "Audit kind filters may only contain letters, numbers, '.', '_', or '-'.".into(),
+            )
+        }
+    };
+    let connection = shared_state_db(&app)?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<Value>, String> {
+        let connection = lock_state_db(&connection)?;
+        let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<Value> {
+            let payload: String = row.get(4)?;
+            Ok(json!({
+                "id": row.get::<_, i64>(0)?,
+                "kind": row.get::<_, String>(1)?,
+                "threadId": row.get::<_, Option<String>>(2)?,
+                "createdAt": row.get::<_, i64>(3)?,
+                "payload": serde_json::from_str::<Value>(&payload).unwrap_or(Value::String(payload)),
+            }))
+        };
+        let rows = if let Some(prefix) = kind_prefix {
+            let escaped = prefix.replace('\\', "\\\\").replace('_', "\\_");
+            let mut statement = connection
+                .prepare(
+                    "SELECT id, kind, thread_id, created_at, payload FROM audit_events
+                     WHERE kind LIKE ?1 ESCAPE '\\' ORDER BY id DESC LIMIT ?2",
+                )
+                .map_err(|error| format!("Could not read recent audit events: {error}"))?;
+            let collected = statement
+                .query_map(params![format!("{escaped}%"), limit], map_row)
+                .map_err(|error| format!("Could not query recent audit events: {error}"))?
+                .collect::<Result<Vec<_>, _>>();
+            collected
+        } else {
+            let mut statement = connection
+                .prepare(
+                    "SELECT id, kind, thread_id, created_at, payload FROM audit_events
+                     ORDER BY id DESC LIMIT ?1",
+                )
+                .map_err(|error| format!("Could not read recent audit events: {error}"))?;
+            let collected = statement
+                .query_map(params![limit], map_row)
+                .map_err(|error| format!("Could not query recent audit events: {error}"))?
+                .collect::<Result<Vec<_>, _>>();
+            collected
+        };
+        rows.map_err(|error| format!("Could not decode recent audit events: {error}"))
+    })
+    .await
+    .map_err(|error| format!("Audit read task failed: {error}"))?
+}
+
 #[tauri::command]
 async fn diagnostics_read(app: AppHandle) -> Result<Value, String> {
     let runtime = codex_runtime_status(app.clone()).await;
@@ -977,6 +1048,22 @@ async fn diagnostics_export(app: AppHandle, path: String) -> Result<(), String> 
     tokio::fs::write(destination, text)
         .await
         .map_err(|error| format!("Could not export diagnostics: {error}"))
+}
+
+const MAX_TEXT_EXPORT_BYTES: usize = 20 * 1024 * 1024;
+
+/// Writes UTF-8 text to a user-chosen destination (picked via the OS save
+/// dialog). Restricted to visible files inside the home folder, like
+/// diagnostics exports.
+#[tauri::command]
+async fn export_text_file(app: AppHandle, path: String, contents: String) -> Result<(), String> {
+    if contents.len() > MAX_TEXT_EXPORT_BYTES {
+        return Err("The exported text exceeds 20 MB.".into());
+    }
+    let destination = validated_export_path(&app, &path)?;
+    tokio::fs::write(destination, contents)
+        .await
+        .map_err(|error| format!("Could not export the text file: {error}"))
 }
 
 const MAX_SKILL_FILE_BYTES: u64 = 1_048_576;
@@ -1724,6 +1811,7 @@ async fn spawn_server(app: &AppHandle) -> Result<Arc<AppServer>, String> {
         flush_deltas(&mut delta_buffer, &app_for_reader);
 
         alive_for_reader.store(false, Ordering::Release);
+        let _ = app_for_reader.emit("codex-runtime", json!({ "alive": false }));
         let mut pending = pending_for_reader.lock().await;
         for (_, sender) in pending.drain() {
             let _ = sender.send(Err("Codex App Server connection closed".into()));
@@ -1772,6 +1860,7 @@ async fn spawn_server(app: &AppHandle) -> Result<Arc<AppServer>, String> {
         server.shutdown().await;
         return Err(error);
     }
+    let _ = app.emit("codex-runtime", json!({ "alive": true }));
     Ok(server)
 }
 
@@ -2062,8 +2151,10 @@ pub fn run() {
             state_read,
             state_write,
             audit_append,
+            audit_recent,
             diagnostics_read,
             diagnostics_export,
+            export_text_file,
             local_skills_scan,
             local_skills_sync,
             local_skills_import,

@@ -55,6 +55,7 @@ function modalProps(overrides: Partial<Parameters<typeof SettingsModal>[0]> = {}
     onCreateSkill: vi.fn(async () => true),
     onRenameSkill: vi.fn(() => true),
     onToggleSkill: vi.fn(),
+    onProjects: vi.fn(),
     ...overrides,
   };
 }

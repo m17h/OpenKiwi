@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef } from "react";
 import { auditEvent, rpc } from "../lib/codex";
 import { useTaskStore } from "../lib/taskStore";
 import { scheduleRunSnapshot, threadStartParams, turnStartParams } from "../lib/turnConfig";
-import type { AppSettings, Project, ScheduleRunSettings, ScheduledTask, Thread } from "../types";
+import type { AppSettings, Project, ScheduleRunRecord, ScheduleRunSettings, ScheduledTask, Thread } from "../types";
 
 export interface SchedulerDeps {
   schedules: ScheduledTask[];
@@ -15,6 +15,7 @@ export interface SchedulerDeps {
   ensureSkillRoots: () => Promise<void>;
   bindThreadToProject: (threadId: string, projectPath: string) => void;
   onThreadStarted: (project: Project) => void;
+  recordRun: (run: ScheduleRunRecord) => void;
 }
 
 /**
@@ -57,9 +58,27 @@ export function useScheduler(deps: SchedulerDeps): void {
         nextRunAt: Date.now() + item.intervalMinutes * 60_000,
       }));
       void auditEvent("schedule.started", { scheduleId: scheduled.id, projectId: project.id }, started.thread.id).catch(() => {});
+      current.recordRun({
+        id: crypto.randomUUID(),
+        scheduleId: scheduled.id,
+        scheduleName: scheduled.name,
+        projectId: scheduled.projectId,
+        threadId: started.thread.id,
+        at: Date.now(),
+        status: "started",
+      });
       current.onThreadStarted(project);
     } catch (reason) {
       depsRef.current.updateSchedule(scheduled.id, (item) => ({ ...item, nextRunAt: Date.now() + 5 * 60_000 }));
+      depsRef.current.recordRun({
+        id: crypto.randomUUID(),
+        scheduleId: scheduled.id,
+        scheduleName: scheduled.name,
+        projectId: scheduled.projectId,
+        at: Date.now(),
+        status: "failed",
+        error: String(reason).slice(0, 200),
+      });
       void auditEvent("schedule.failed", { scheduleId: scheduled.id, error: String(reason) }).catch(() => {});
     } finally {
       runningRef.current.delete(scheduled.id);

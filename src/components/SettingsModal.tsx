@@ -7,6 +7,7 @@ import {
   ChevronRight,
   Download,
   ExternalLink,
+  FolderCog,
   KeyRound,
   LoaderCircle,
   Minus,
@@ -21,7 +22,7 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { exportDiagnostics, rpc, saveOpenRouterKey, type CodexRuntimeStatus } from "../lib/codex";
+import { exportDiagnostics, recentAuditRows, rpc, saveOpenRouterKey, type AuditRow, type CodexRuntimeStatus } from "../lib/codex";
 import { DEFAULT_OPENAI_MODEL, DEFAULT_SETTINGS, RELEASE_NOTES_URL, THEMES } from "../lib/appConfig";
 import { friendlyError } from "../lib/errors";
 import { updateProgress, type AppUpdater } from "../lib/appUpdater";
@@ -33,14 +34,16 @@ import type {
   Account,
   AppSettings,
   CustomAgentProfile,
+  PermissionMode,
   Project,
   ProjectAction,
   PromptProfile,
   ScheduledTask,
+  ScheduleRunRecord,
   ThemeName,
 } from "../types";
 
-export type SettingsSection = "general" | "models" | "prompts" | "agents" | "workflows" | "skills" | "tools" | "updates";
+export type SettingsSection = "general" | "models" | "prompts" | "agents" | "workflows" | "projects" | "skills" | "tools" | "updates";
 
 export function SettingsModal({
   open,
@@ -75,6 +78,9 @@ export function SettingsModal({
   onAgents,
   onActions,
   onSchedules,
+  onProjects,
+  scheduleRuns = [],
+  onOpenRun,
   onChooseSkillsFolder,
   onRefreshSkills,
   onImportSkills,
@@ -114,6 +120,9 @@ export function SettingsModal({
   onAgents: (value: CustomAgentProfile[]) => void;
   onActions: (value: ProjectAction[]) => void;
   onSchedules: (value: ScheduledTask[]) => void;
+  onProjects: (value: Project[]) => void;
+  scheduleRuns?: ScheduleRunRecord[];
+  onOpenRun?: (threadId: string) => void;
   onChooseSkillsFolder: () => void;
   onRefreshSkills: () => void;
   onImportSkills: () => void;
@@ -230,13 +239,14 @@ export function SettingsModal({
               ["prompts", "Prompts", Sparkles],
               ["agents", "Agents", UsersRound],
               ["workflows", "Workflows", Play],
+              ["projects", "Projects", FolderCog],
               ["skills", "Skills", Boxes],
               ["tools", "Tools & MCP", Wrench],
               ["updates", "Updates", Download],
             ] as const).map(([id, label, Icon]) => <button key={id} className={settingsSection === id ? "active" : ""} onClick={() => setSettingsSection(id)} aria-current={settingsSection === id ? "page" : undefined}><Icon size={14} /><span>{label}</span><ChevronRight size={12} /></button>)}
           </nav>
           <div className="settings-content">
-          <div className="settings-pane-heading"><span>{settingsSection === "general" ? "General" : settingsSection === "models" ? "Models & accounts" : settingsSection === "prompts" ? "Prompts" : settingsSection === "agents" ? "Agents" : settingsSection === "workflows" ? "Workflows" : settingsSection === "skills" ? "Skills" : settingsSection === "tools" ? "Tools & MCP" : "Updates"}</span><small>{settingsSection === "general" ? "Appearance, runtime behavior, and diagnostics" : settingsSection === "models" ? "Providers, credentials, and model routing" : settingsSection === "prompts" ? "Your complete harness instruction and reusable profiles" : settingsSection === "agents" ? "Delegation limits and specialist configurations" : settingsSection === "workflows" ? "Reusable project actions and scheduled tasks" : settingsSection === "skills" ? "Local Markdown workflows with model-facing invocation names" : settingsSection === "tools" ? "Model Context Protocol servers and live tool controls" : "Secure releases delivered directly from the OpenKiwi repository"}</small></div>
+          <div className="settings-pane-heading"><span>{settingsSection === "general" ? "General" : settingsSection === "models" ? "Models & accounts" : settingsSection === "prompts" ? "Prompts" : settingsSection === "agents" ? "Agents" : settingsSection === "workflows" ? "Workflows" : settingsSection === "projects" ? "Projects" : settingsSection === "skills" ? "Skills" : settingsSection === "tools" ? "Tools & MCP" : "Updates"}</span><small>{settingsSection === "general" ? "Appearance, runtime behavior, and diagnostics" : settingsSection === "models" ? "Providers, credentials, and model routing" : settingsSection === "prompts" ? "Your complete harness instruction and reusable profiles" : settingsSection === "agents" ? "Delegation limits and specialist configurations" : settingsSection === "workflows" ? "Reusable project actions and scheduled tasks" : settingsSection === "projects" ? "Per-project model, permission, and prompt overrides" : settingsSection === "skills" ? "Local Markdown workflows with model-facing invocation names" : settingsSection === "tools" ? "Model Context Protocol servers and live tool controls" : "Secure releases delivered directly from the OpenKiwi repository"}</small></div>
           {settingsSection === "general" &&
           <section className="settings-section theme-settings-section">
             <div className="settings-section-heading settings-heading-with-action">
@@ -301,9 +311,13 @@ export function SettingsModal({
             onSchedules={onSchedules}
             mcpServers={mcpServers}
             onMcpChanged={onMcpChanged}
+            scheduleRuns={scheduleRuns}
+            onOpenRun={onOpenRun}
           />}
 
           {settingsSection === "tools" && <div className="settings-workspace-link"><div><strong>Live tool controls</strong><small>{workspaceToolsAvailable ? "Inspect skills, connect configured MCP servers, and run project actions in the active workspace." : "Select a project to inspect live skills, MCP servers, and project actions."}</small></div><button className="secondary-button" onClick={onWorkspaceTools} disabled={!workspaceToolsAvailable}><PanelRight size={13} /> Open workspace tools</button></div>}
+
+          {settingsSection === "projects" && <ProjectOverridesSettings projects={projects} onProjects={onProjects} />}
 
           {settingsSection === "skills" && <SkillLibrary
             folder={skillsFolder}
@@ -327,8 +341,9 @@ export function SettingsModal({
               <div><span><strong>Project instructions</strong><small>Allow AGENTS.md discovery for project threads (up to 32 KB).</small></span><button type="button" role="switch" aria-checked={local.projectInstructionsEnabled} className={`toggle-switch ${local.projectInstructionsEnabled ? "on" : ""}`} onClick={() => setLocal({ ...local, projectInstructionsEnabled: !local.projectInstructionsEnabled })}><span /></button></div>
               <div><span><strong>Desktop notifications</strong><small>Notify when a background task finishes.</small></span><button type="button" role="switch" aria-checked={local.notificationsEnabled} className={`toggle-switch ${local.notificationsEnabled ? "on" : ""}`} onClick={() => setLocal({ ...local, notificationsEnabled: !local.notificationsEnabled })}><span /></button></div>
             </div>
-            <div className="runtime-field-grid"><label><span>OpenAI service tier</span><select value={local.serviceTier ?? ""} onChange={(event) => setLocal({ ...local, serviceTier: event.target.value || null })}><option value="">Standard</option><option value="priority">Fast / priority</option></select></label><label><span>Terminal scrollback</span><select value={local.terminalScrollback} onChange={(event) => setLocal({ ...local, terminalScrollback: Number(event.target.value) })}><option value={25000}>25k characters</option><option value={100000}>100k characters</option><option value={500000}>500k characters</option></select></label></div>
+            <div className="runtime-field-grid"><label><span>OpenAI service tier</span><select value={local.serviceTier ?? ""} onChange={(event) => setLocal({ ...local, serviceTier: event.target.value || null })}><option value="">Standard</option><option value="priority">Fast / priority</option></select></label><label><span>Terminal scrollback</span><select value={local.terminalScrollback} onChange={(event) => setLocal({ ...local, terminalScrollback: Number(event.target.value) })}><option value={25000}>25k characters</option><option value={100000}>100k characters</option><option value={500000}>500k characters</option></select></label><label><span>UI size</span><select value={local.uiScale ?? 100} onChange={(event) => setLocal({ ...local, uiScale: Number(event.target.value) })}><option value={90}>Compact (90%)</option><option value={100}>Default (100%)</option><option value={110}>Comfortable (110%)</option><option value={125}>Large (125%)</option></select></label></div>
             <div className="diagnostic-card"><span><strong>Diagnostics</strong><small>{runtimeStatus?.version ?? "Runtime version unavailable"}{runtimeStatus?.warning ? ` · ${runtimeStatus.warning}` : runtimeStatus?.compatible ? " · compatible" : ""}</small></span><button className="secondary-button" onClick={() => void exportDiagnosticBundle()}>Export JSON</button></div>
+            <RecentErrorsPanel active={open && settingsSection === "general"} />
           </section>}
 
           {settingsSection === "agents" &&
@@ -432,6 +447,87 @@ export function SettingsModal({
           <button className="secondary-button" onClick={requestClose}>Cancel</button>
           <button className="primary-button" onClick={() => onSave({ ...local, subagentMax: Math.min(24, Math.max(1, local.subagentMax)) })}>Save settings</button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function ProjectOverridesSettings({ projects, onProjects }: { projects: Project[]; onProjects: (value: Project[]) => void }) {
+  const updateOverrides = (id: string, patch: Partial<NonNullable<Project["overrides"]>>) => {
+    onProjects(projects.map((project) => {
+      if (project.id !== id) return project;
+      const overrides = { ...(project.overrides ?? {}), ...patch };
+      for (const key of Object.keys(overrides) as Array<keyof typeof overrides>) {
+        if (!overrides[key]) delete overrides[key];
+      }
+      return { ...project, overrides: Object.keys(overrides).length ? overrides : undefined };
+    }));
+  };
+  return (
+    <section className="settings-section">
+      <div className="settings-section-heading">
+        <div className="settings-icon"><FolderCog size={17} /></div>
+        <div><h3>Per-project overrides</h3><p>Give a project its own model, permission mode, or instruction prompt. Empty fields inherit the global settings. Changes apply to the next thread operation.</p></div>
+      </div>
+      {projects.length ? projects.map((project) => (
+        <div className="project-override-card" key={project.id}>
+          <div className="project-override-title"><strong>{project.name}</strong><small>{project.path}</small></div>
+          <div className="runtime-field-grid">
+            <label>
+              <span>Permission mode</span>
+              <select
+                value={project.overrides?.permission ?? ""}
+                onChange={(event) => updateOverrides(project.id, { permission: (event.target.value || undefined) as PermissionMode | undefined })}
+              >
+                <option value="">Inherit global</option>
+                <option value="read-only">Read only</option>
+                <option value="ask">Ask to act</option>
+                <option value="full">Full access</option>
+              </select>
+            </label>
+            <label>
+              <span>Model</span>
+              <input value={project.overrides?.model ?? ""} placeholder="Inherit global" onChange={(event) => updateOverrides(project.id, { model: event.target.value || undefined })} />
+            </label>
+          </div>
+          <label className="field-label">
+            <span>Instruction prompt override</span>
+            <textarea className="prompt-editor" rows={3} value={project.overrides?.systemPrompt ?? ""} placeholder="Inherit the global prompt" onChange={(event) => updateOverrides(project.id, { systemPrompt: event.target.value || undefined })} />
+          </label>
+        </div>
+      )) : <div className="tool-empty-line">Open a project first — each project you add appears here with its own overrides.</div>}
+    </section>
+  );
+}
+
+function RecentErrorsPanel({ active }: { active: boolean }) {
+  const [rows, setRows] = useState<AuditRow[]>([]);
+  const [unavailable, setUnavailable] = useState(false);
+  useEffect(() => {
+    if (!active) return;
+    recentAuditRows(20, "ui.error")
+      .then((result) => {
+        setRows(result);
+        setUnavailable(false);
+      })
+      .catch(() => setUnavailable(true));
+  }, [active]);
+  if (unavailable || !rows.length) return null;
+  return (
+    <div className="recent-errors">
+      <h3 className="panel-label">Recent errors</h3>
+      <div className="recent-errors-list">
+        {rows.map((row) => {
+          const message = typeof row.payload === "object" && row.payload !== null && "message" in row.payload
+            ? String((row.payload as { message?: unknown }).message ?? "")
+            : String(row.payload ?? "");
+          return (
+            <div key={row.id}>
+              <small>{new Date(row.createdAt).toLocaleString()}</small>
+              <span>{message || row.kind}</span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

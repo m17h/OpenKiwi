@@ -1,17 +1,22 @@
-import { Children, isValidElement, memo, useMemo, useState, type ReactNode } from "react";
+import { Children, isValidElement, memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import type { VirtuosoHandle } from "react-virtuoso";
 import { Check, ChevronRight, Clipboard, FileCode2, Pencil, Sparkles, TerminalSquare, UsersRound } from "lucide-react";
 import Markdown from "react-markdown";
 import { Virtuoso } from "react-virtuoso";
 import remarkGfm from "remark-gfm";
-import type { Activity, ChatMessage } from "../types";
+import type { Activity, ChatMessage, PendingApproval } from "../types";
+import type { JsonObject } from "../lib/codex";
+import { InlineApprovalCard } from "./ApprovalCenter";
 
 type TimelineEntry =
   | { kind: "message"; value: ChatMessage }
   | { kind: "activity"; value: Activity }
-  | { kind: "thinking"; label: string };
+  | { kind: "thinking"; label: string }
+  | { kind: "approval"; value: PendingApproval };
 
 function entryOrder(entry: TimelineEntry): number {
-  return entry.kind === "thinking" ? Number.MAX_SAFE_INTEGER : entry.value.timelineOrder ?? Number.MAX_SAFE_INTEGER;
+  if (entry.kind === "thinking" || entry.kind === "approval") return Number.MAX_SAFE_INTEGER;
+  return entry.value.timelineOrder ?? Number.MAX_SAFE_INTEGER;
 }
 
 export function orderedTimelineEntries(messages: ChatMessage[], activities: Activity[]): TimelineEntry[] {
@@ -204,36 +209,83 @@ export function ChatTimeline({
   activities,
   running,
   thinkingLabel,
+  approval,
+  searchQuery,
+  searchActiveMatch,
+  onSearchMatches,
   onEditMessage,
+  onApprovalRespond,
 }: {
   messages: ChatMessage[];
   activities: Activity[];
   running: boolean;
   thinkingLabel: string;
+  approval?: PendingApproval | null;
+  searchQuery?: string;
+  searchActiveMatch?: number;
+  onSearchMatches?: (count: number) => void;
   onEditMessage?: (text: string) => void;
+  onApprovalRespond?: (approval: PendingApproval, result: JsonObject) => void;
 }) {
   const entries = useMemo<TimelineEntry[]>(() => {
     const next = orderedTimelineEntries(messages, activities);
-    if (running && !messages.some((message) => message.streaming) && !activities.some((activity) => activity.kind === "reasoning" && activity.status === "inProgress")) {
+    if (running && !approval && !messages.some((message) => message.streaming) && !activities.some((activity) => activity.kind === "reasoning" && activity.status === "inProgress")) {
       next.push({ kind: "thinking", label: thinkingLabel });
     }
+    if (approval) next.push({ kind: "approval", value: approval });
     return next;
-  }, [activities, messages, running, thinkingLabel]);
+  }, [activities, approval, messages, running, thinkingLabel]);
 
+  // In-conversation search: matches are entry indices; the active match is
+  // scrolled into view and highlighted.
+  const virtuosoRef = useRef<VirtuosoHandle>(null);
+  const matchIndices = useMemo(() => {
+    const query = searchQuery?.trim().toLowerCase();
+    if (!query) return [];
+    const hits: number[] = [];
+    entries.forEach((entry, index) => {
+      const haystack = entry.kind === "message"
+        ? entry.value.text
+        : entry.kind === "activity"
+          ? `${entry.value.title} ${entry.value.detail ?? ""}`
+          : "";
+      if (haystack.toLowerCase().includes(query)) hits.push(index);
+    });
+    return hits;
+  }, [entries, searchQuery]);
+  useEffect(() => {
+    onSearchMatches?.(matchIndices.length);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [matchIndices]);
+  const activeEntryIndex = matchIndices.length
+    ? matchIndices[((searchActiveMatch ?? 0) % matchIndices.length + matchIndices.length) % matchIndices.length]
+    : -1;
+  useEffect(() => {
+    if (activeEntryIndex >= 0) virtuosoRef.current?.scrollToIndex({ index: activeEntryIndex, align: "center" });
+  }, [activeEntryIndex]);
   return (
     <Virtuoso
+      ref={virtuosoRef}
       className="timeline virtual-timeline"
       data={entries}
       components={VIRTUOSO_COMPONENTS}
       followOutput={(atBottom) => atBottom ? "smooth" : false}
       increaseViewportBy={{ top: 500, bottom: 800 }}
       computeItemKey={(index, entry) => entry.kind === "thinking" ? `thinking-${index}` : `${entry.kind}-${entry.value.id}`}
-      itemContent={(_, entry) => {
+      itemContent={(index, entry) => {
+        const hitClass = index === activeEntryIndex ? " search-hit" : "";
         if (entry.kind === "message") {
-          return <div className="timeline-entry"><MessageRow message={entry.value} onEdit={onEditMessage} /></div>;
+          return <div className={`timeline-entry${hitClass}`}><MessageRow message={entry.value} onEdit={onEditMessage} /></div>;
         }
         if (entry.kind === "activity") {
-          return <div className="timeline-entry"><ActivityRow activity={entry.value} /></div>;
+          return <div className={`timeline-entry${hitClass}`}><ActivityRow activity={entry.value} /></div>;
+        }
+        if (entry.kind === "approval") {
+          return (
+            <div className="timeline-entry">
+              <InlineApprovalCard approval={entry.value} onRespond={(result) => onApprovalRespond?.(entry.value, result)} />
+            </div>
+          );
         }
         return (
           <div className="timeline-entry">

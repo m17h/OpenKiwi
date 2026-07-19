@@ -84,6 +84,8 @@ function PanelHeader({ icon: Icon, title, subtitle, onClose }: { icon: typeof Co
 
 export function StudioDock(props: {
   open: boolean;
+  width?: number;
+  onResizeStart?: (event: React.PointerEvent) => void;
   tab: StudioTab;
   projectName?: string;
   projectPath?: string;
@@ -97,6 +99,7 @@ export function StudioDock(props: {
   attachments: AttachmentRecord[];
   usage: TokenUsageView | null;
   costEstimate?: string;
+  costTotals?: string;
   rateSummary: string;
   skills: SkillView[];
   mcpServers: McpView[];
@@ -159,7 +162,8 @@ export function StudioDock(props: {
     return <aside className="studio-dock closed" aria-label="Project workspace tools" aria-hidden inert />;
   }
   return (
-    <aside className={`studio-dock ${props.open ? "open" : "closed"}`} aria-label="Project workspace tools" aria-hidden={!props.open} inert={!props.open ? true : undefined}>
+    <aside className={`studio-dock ${props.open ? "open" : "closed"}`} style={props.width ? { "--dock-width": `${props.width}px` } as React.CSSProperties : undefined} aria-label="Project workspace tools" aria-hidden={!props.open} inert={!props.open ? true : undefined}>
+      {props.onResizeStart && <div className="pane-resize dock-resize" onPointerDown={props.onResizeStart} role="separator" aria-orientation="vertical" aria-label="Resize workspace tools" />}
       <nav className="studio-tabs" aria-label="Workspace tools">
         {TABS.map(({ id, label, icon: Icon }) => <button key={id} className={props.tab === id ? "active" : ""} onClick={() => props.onTab(id)} title={label} aria-label={`${label} workspace tool`} aria-current={props.tab === id ? "page" : undefined}><Icon size={16} /><span>{label}</span></button>)}
       </nav>
@@ -180,6 +184,27 @@ export function StudioDock(props: {
                   <summary>
                     <code>{section.path}</code>
                     <span className="diff-file-stats"><em className="added">+{section.additions}</em> <em className="removed">−{section.deletions}</em></span>
+                    <span className="diff-file-actions">
+                      <button
+                        onClick={(event) => {
+                          event.preventDefault();
+                          props.onGitPathAction("stage", section.path);
+                        }}
+                        title={`Stage ${section.path}`}
+                      >
+                        <Plus size={10} /> Stage
+                      </button>
+                      <button
+                        className="danger-action"
+                        onClick={(event) => {
+                          event.preventDefault();
+                          props.onGitPathAction("revert", section.path);
+                        }}
+                        title={`Revert ${section.path}`}
+                      >
+                        <RotateCcw size={10} />
+                      </button>
+                    </span>
                   </summary>
                   <DiffText text={section.text} />
                 </details>
@@ -224,6 +249,7 @@ export function StudioDock(props: {
           <div className="usage-hero"><span>Context used</span><strong>{props.usage?.totalTokens.toLocaleString() ?? "—"}</strong><small>{props.usage?.contextWindow ? `of ${props.usage.contextWindow.toLocaleString()} tokens` : "Current thread"}{props.costEstimate ? ` · ${props.costEstimate}` : ""}</small><i style={{ width: `${Math.min(100, ((props.usage?.totalTokens ?? 0) / (props.usage?.contextWindow || 1)) * 100)}%` }} /></div>
           <div className="metric-grid three"><div><strong>{props.usage?.inputTokens.toLocaleString() ?? "—"}</strong><span>Input</span></div><div><strong>{props.usage?.outputTokens.toLocaleString() ?? "—"}</strong><span>Output</span></div><div><strong>{props.usage?.reasoningOutputTokens.toLocaleString() ?? "—"}</strong><span>Reasoning</span></div></div>
           <div className="rate-card"><span>Account limits</span><strong>{props.rateSummary || "Sign in to view live limits"}</strong></div>
+          {props.costTotals && <div className="rate-card"><span>OpenRouter spend</span><strong>{props.costTotals}</strong></div>}
           <h3 className="panel-label">Request audit</h3><div className="audit-table">{props.promptAudit.map((row) => <div key={row.label}><span>{row.label}</span><code>{row.value}</code></div>)}</div>
         </>}
 

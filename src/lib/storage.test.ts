@@ -22,10 +22,18 @@ describe("durable storage", () => {
     localStorage.setItem("kiwi.projects", JSON.stringify([{ id: "one" }]));
     invoke.mockResolvedValueOnce(null).mockResolvedValueOnce(undefined);
     await hydrateNativeStorage(["kiwi.projects"]);
-    expect(invoke).toHaveBeenLastCalledWith("state_write", {
+    // Hydration now also stamps kiwi.schemaVersion afterwards, so assert the
+    // migration write happened rather than that it was last.
+    expect(invoke).toHaveBeenCalledWith("state_write", {
       key: "kiwi.projects",
       value: [{ id: "one" }],
     });
+  });
+
+  it("stamps the storage schema version after hydration", async () => {
+    invoke.mockResolvedValue(null);
+    await hydrateNativeStorage(["kiwi.settings"]);
+    expect(loadStored("kiwi.schemaVersion", 0)).toBeGreaterThan(0);
   });
 
   it("writes both the immediate cache and durable store", () => {

@@ -8,6 +8,7 @@ export const THEMES: Array<{ id: ThemeName; name: string; description: string; s
   { id: "midnight", name: "Midnight", description: "Deep navy with a crisp cyan signal", swatches: ["#080c14", "#111a28", "#73d7ff"] },
   { id: "ember", name: "Ember", description: "Warm graphite with a copper glow", swatches: ["#100c0a", "#211712", "#f0a566"] },
   { id: "violet", name: "Violet", description: "Ink black with an ultraviolet pulse", swatches: ["#0c0912", "#1b1428", "#c39bff"] },
+  { id: "daylight", name: "Daylight", description: "Paper white with a deep leaf green", swatches: ["#f4f5f2", "#ffffff", "#3e8e22"] },
 ];
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -25,6 +26,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   theme: "kiwi",
   notificationsEnabled: true,
   terminalScrollback: 100_000,
+  uiScale: 100,
 };
 
 export const DEFAULT_PROMPT_PROFILES: PromptProfile[] = [

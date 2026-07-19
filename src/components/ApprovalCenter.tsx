@@ -7,27 +7,55 @@ import type { PendingApproval } from "../types";
 
 type Decision = "accept" | "acceptForSession" | "decline";
 
-function ApprovalButtons({ onDecision, allowSession = true }: { onDecision: (value: Decision) => void; allowSession?: boolean }) {
-  return <div className="approval-actions"><button className="secondary-button danger" autoFocus onClick={() => onDecision("decline")}>Deny</button>{allowSession && <button className="secondary-button" onClick={() => onDecision("acceptForSession")}>Allow for session</button>}<button className="primary-button" onClick={() => onDecision("accept")}>Allow once</button></div>;
+function ApprovalButtons({ onDecision, allowSession = true, autoFocusDeny = true }: { onDecision: (value: Decision) => void; allowSession?: boolean; autoFocusDeny?: boolean }) {
+  return <div className="approval-actions"><button className="secondary-button danger" autoFocus={autoFocusDeny} onClick={() => onDecision("decline")}>Deny</button>{allowSession && <button className="secondary-button" onClick={() => onDecision("acceptForSession")}>Allow for session</button>}<button className="primary-button" onClick={() => onDecision("accept")}>Allow once</button></div>;
+}
+
+/** Maps a button decision onto the wire format each approval method expects. */
+export function approvalResponse(approval: PendingApproval, decision: Decision): JsonObject {
+  if (approval.method === "item/permissions/requestApproval") {
+    const requested = (approval.params.permissions ?? {}) as JsonObject;
+    return {
+      permissions: decision === "decline" ? { network: { enabled: false }, fileSystem: { read: [], write: [], entries: [] } } : requested,
+      scope: decision === "acceptForSession" ? "session" : "turn",
+    };
+  }
+  const legacy = approval.method === "execCommandApproval" || approval.method === "applyPatchApproval";
+  return { decision: legacy ? decision === "accept" ? "approved" : decision === "acceptForSession" ? "approved_for_session" : "denied" : decision };
+}
+
+export function approvalSummary(approval: PendingApproval): { title: string; reason: string; command: string } {
+  const isFile = approval.method.includes("fileChange") || approval.method.includes("applyPatch");
+  const permissions = approval.method === "item/permissions/requestApproval";
+  const commandValue = approval.params.command;
+  return {
+    title: isFile ? "Allow file changes?" : permissions ? "Grant additional permissions?" : "Allow this action?",
+    reason: String(approval.params.reason ?? "The agent is requesting permission to continue."),
+    command: Array.isArray(commandValue) ? commandValue.join(" ") : String(commandValue ?? ""),
+  };
+}
+
+/**
+ * Approval rendered inline in the conversation for the thread the user is
+ * looking at — no app-global modal takeover. Buttons do not steal focus.
+ */
+export function InlineApprovalCard({ approval, onRespond }: { approval: PendingApproval; onRespond: (value: JsonObject) => void }) {
+  const { title, reason, command } = approvalSummary(approval);
+  return (
+    <div className="inline-approval" role="group" aria-label={title}>
+      <div className="inline-approval-head"><ShieldAlert size={14} /><strong>{title}</strong></div>
+      <p>{reason}</p>
+      {command && <pre className="approval-command">{command}</pre>}
+      <ApprovalButtons autoFocusDeny={false} onDecision={(decision) => onRespond(approvalResponse(approval, decision))} />
+    </div>
+  );
 }
 
 interface ApprovalContext { threadLabel?: string; pendingCount?: number }
 
 function StandardApproval({ approval, onRespond, threadLabel, pendingCount }: { approval: PendingApproval; onRespond: (value: JsonObject) => void } & ApprovalContext) {
-  const isFile = approval.method.includes("fileChange") || approval.method.includes("applyPatch");
-  const commandValue = approval.params.command;
-  const command = Array.isArray(commandValue) ? commandValue.join(" ") : String(commandValue ?? "");
-  const reason = String(approval.params.reason ?? "The agent is requesting permission to continue.");
-  const legacy = approval.method === "execCommandApproval" || approval.method === "applyPatchApproval";
-  const permissions = approval.method === "item/permissions/requestApproval";
-  return <Modal title={isFile ? "Allow file changes?" : permissions ? "Grant additional permissions?" : "Allow this action?"} description={reason} threadLabel={threadLabel} pendingCount={pendingCount}>{command && <pre className="approval-command">{command}</pre>}<ApprovalButtons onDecision={(decision) => {
-    if (permissions) {
-      const requested = (approval.params.permissions ?? {}) as JsonObject;
-      onRespond({ permissions: decision === "decline" ? { network: { enabled: false }, fileSystem: { read: [], write: [], entries: [] } } : requested, scope: decision === "acceptForSession" ? "session" : "turn" });
-      return;
-    }
-    onRespond({ decision: legacy ? decision === "accept" ? "approved" : decision === "acceptForSession" ? "approved_for_session" : "denied" : decision });
-  }} /></Modal>;
+  const { title, reason, command } = approvalSummary(approval);
+  return <Modal title={title} description={reason} threadLabel={threadLabel} pendingCount={pendingCount}>{command && <pre className="approval-command">{command}</pre>}<ApprovalButtons onDecision={(decision) => onRespond(approvalResponse(approval, decision))} /></Modal>;
 }
 
 interface UserQuestion { id: string; header: string; question: string; isSecret?: boolean; options?: Array<{ label: string; description: string }> | null }

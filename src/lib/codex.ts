@@ -79,6 +79,22 @@ export async function readDiagnostics<T = JsonObject>(): Promise<T> {
   return invoke<T>("diagnostics_read");
 }
 
+export interface AuditRow {
+  id: number;
+  kind: string;
+  threadId: string | null;
+  payload: unknown;
+  createdAt: number;
+}
+
+export async function recentAuditRows(limit = 50, kindPrefix?: string): Promise<AuditRow[]> {
+  return invoke<AuditRow[]>("audit_recent", { limit, kindPrefix: kindPrefix ?? null });
+}
+
+export async function exportTextFile(path: string, contents: string): Promise<void> {
+  await invoke("export_text_file", { path, contents });
+}
+
 export async function exportDiagnostics(path: string): Promise<void> {
   await invoke("diagnostics_export", { path });
 }

@@ -3,8 +3,14 @@ import type { JsonObject } from "./lib/codex";
 
 export type Provider = "openai" | "openrouter";
 export type PermissionMode = "read-only" | "ask" | "full";
-export type ThemeName = "kiwi" | "midnight" | "ember" | "violet";
+export type ThemeName = "kiwi" | "midnight" | "ember" | "violet" | "daylight";
 export type WorkspaceMode = "chat" | "project";
+
+export interface ProjectOverrides {
+  model?: string;
+  permission?: PermissionMode;
+  systemPrompt?: string;
+}
 
 export interface Project {
   id: string;
@@ -13,6 +19,8 @@ export interface Project {
   pinned?: boolean;
   isChat?: boolean;
   worktree?: { source: string; branch: string };
+  /** Per-project settings; unset fields inherit the global settings. */
+  overrides?: ProjectOverrides;
 }
 
 export interface Thread {
@@ -120,6 +128,17 @@ export interface ScheduleRunSettings {
   serviceTier: string | null;
 }
 
+export interface ScheduleRunRecord {
+  id: string;
+  scheduleId: string;
+  scheduleName: string;
+  projectId: string | null;
+  threadId?: string;
+  at: number;
+  status: "started" | "failed";
+  error?: string;
+}
+
 export interface ScheduledTask {
   id: string;
   name: string;
@@ -155,4 +174,5 @@ export interface AppSettings {
   theme: ThemeName;
   notificationsEnabled: boolean;
   terminalScrollback: number;
+  uiScale: number;
 }

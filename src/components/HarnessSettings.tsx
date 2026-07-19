@@ -1,13 +1,13 @@
 import { useState } from "react";
 import { Bot, Check, Clock3, Play, Plus, Save, Sparkles, Trash2, Wrench } from "lucide-react";
-import type { AppSettings, CustomAgentProfile, Project, ProjectAction, PromptProfile, ScheduledTask } from "../types";
+import type { AppSettings, CustomAgentProfile, Project, ProjectAction, PromptProfile, ScheduledTask, ScheduleRunRecord } from "../types";
 import { rpc } from "../lib/codex";
 import { friendlyError } from "../lib/errors";
 import { scheduleRunSnapshot } from "../lib/turnConfig";
 
 export interface McpServerView { name: string; status: string; tools: number }
 
-export function HarnessSettings({ section, settings, profiles, agents, actions, schedules, projects, onSettings, onProfiles, onAgents, onActions, onSchedules, mcpServers = [], onMcpChanged }: {
+export function HarnessSettings({ section, settings, profiles, agents, actions, schedules, projects, onSettings, onProfiles, onAgents, onActions, onSchedules, mcpServers = [], onMcpChanged, scheduleRuns = [], onOpenRun }: {
   section: "prompts" | "agents" | "workflows" | "tools";
   settings: AppSettings;
   profiles: PromptProfile[];
@@ -22,6 +22,8 @@ export function HarnessSettings({ section, settings, profiles, agents, actions, 
   onSchedules: (value: ScheduledTask[]) => void;
   mcpServers?: McpServerView[];
   onMcpChanged?: () => void;
+  scheduleRuns?: ScheduleRunRecord[];
+  onOpenRun?: (threadId: string) => void;
 }) {
   const [profileName, setProfileName] = useState("");
   const [agentName, setAgentName] = useState("");
@@ -69,6 +71,25 @@ export function HarnessSettings({ section, settings, profiles, agents, actions, 
     <section className="settings-section">
       <div className="settings-section-heading"><div className="settings-icon"><Clock3 size={17} /></div><div><h3>Scheduled tasks</h3><p>Run a prompt on an interval while OpenKiwi is open. Every run creates a traceable project thread using the model, prompt, and permissions captured when the schedule is saved. Scheduled runs never pause for approval, so "Ask to act" behaves like workspace-write.</p></div></div>
       <div className="manager-list">{schedules.map((schedule) => <div key={schedule.id}><button className={`mini-toggle ${schedule.enabled ? "on" : ""}`} aria-label={`${schedule.enabled ? "Disable" : "Enable"} ${schedule.name}`} aria-pressed={schedule.enabled} onClick={() => onSchedules(schedules.map((item) => item.id === schedule.id ? { ...item, enabled: !item.enabled, nextRunAt: Date.now() + item.intervalMinutes * 60_000 } : item))}><span /></button><span><strong>{schedule.name}</strong><small>Every {schedule.intervalMinutes} min · {projects.find((project) => project.id === schedule.projectId)?.name ?? "No project"}</small></span><button className="manager-delete" aria-label={`Delete ${schedule.name}`} onClick={() => { if (window.confirm(`Delete the scheduled task “${schedule.name}”? It will stop running.`)) onSchedules(schedules.filter((item) => item.id !== schedule.id)); }}><Trash2 size={12} /></button></div>)}</div>
+      {scheduleRuns.length > 0 && (
+        <>
+          <h3 className="panel-label">Recent runs</h3>
+          <div className="schedule-run-list">
+            {scheduleRuns.slice(0, 10).map((run) => (
+              <div key={run.id} className={run.status === "failed" ? "failed" : ""}>
+                <span className={`status-orb ${run.status === "failed" ? "failed" : "ready"}`} />
+                <span className="schedule-run-copy">
+                  <strong>{run.scheduleName}</strong>
+                  <small>{new Date(run.at).toLocaleString()}{run.status === "failed" ? ` · ${run.error ?? "failed"}` : ""}</small>
+                </span>
+                {run.threadId && onOpenRun && (
+                  <button onClick={() => onOpenRun(run.threadId!)} title="Open the thread this run created" aria-label={`Open run thread for ${run.scheduleName}`}><Play size={11} /> Open</button>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
       <div className="schedule-create"><input value={scheduleName} onChange={(event) => setScheduleName(event.target.value)} placeholder="Task name" /><select value={scheduleProject} onChange={(event) => setScheduleProject(event.target.value)}><option value="">Choose project…</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select><input type="number" min={5} value={scheduleMinutes} onChange={(event) => setScheduleMinutes(Math.max(5, Number(event.target.value)))} /><textarea value={schedulePrompt} onChange={(event) => setSchedulePrompt(event.target.value)} placeholder="Prompt to run" rows={3} /><button onClick={() => { if (!scheduleName.trim() || !schedulePrompt.trim() || !scheduleProject) return; onSchedules([...schedules, { id: crypto.randomUUID(), name: scheduleName.trim(), prompt: schedulePrompt.trim(), projectId: scheduleProject, intervalMinutes: scheduleMinutes, enabled: true, nextRunAt: Date.now() + scheduleMinutes * 60_000, run: scheduleRunSnapshot(settings) }]); setScheduleName(""); setSchedulePrompt(""); }} disabled={!scheduleName.trim() || !schedulePrompt.trim() || !scheduleProject}><Plus size={12} /> Add schedule</button></div>
     </section>
     </>}
