@@ -41,9 +41,8 @@ import type {
   ScheduledTask,
   ScheduleRunRecord,
   ThemeName,
+  SettingsSection,
 } from "../types";
-
-export type SettingsSection = "general" | "models" | "prompts" | "agents" | "workflows" | "projects" | "skills" | "tools" | "updates";
 
 export function SettingsModal({
   open,
@@ -87,6 +86,7 @@ export function SettingsModal({
   onCreateSkill,
   onRenameSkill,
   onToggleSkill,
+  onOpenOnboarding,
 }: {
   open: boolean;
   initialSection: SettingsSection;
@@ -129,6 +129,7 @@ export function SettingsModal({
   onCreateSkill: (name: string, instructions: string) => Promise<boolean>;
   onRenameSkill: (path: string, name: string) => boolean;
   onToggleSkill: (path: string) => void;
+  onOpenOnboarding: () => void;
 }) {
   const [local, setLocal] = useState(settings);
   const [apiKey, setApiKey] = useState("");
@@ -141,6 +142,10 @@ export function SettingsModal({
   const requestClose = () => {
     if (dirty && !window.confirm("Discard unsaved settings changes?")) return;
     onClose();
+  };
+  const requestOnboarding = () => {
+    if (dirty && !window.confirm("Discard unsaved settings changes?")) return;
+    onOpenOnboarding();
   };
 
   useEffect(() => {
@@ -247,6 +252,15 @@ export function SettingsModal({
           </nav>
           <div className="settings-content">
           <div className="settings-pane-heading"><span>{settingsSection === "general" ? "General" : settingsSection === "models" ? "Models & accounts" : settingsSection === "prompts" ? "Prompts" : settingsSection === "agents" ? "Agents" : settingsSection === "workflows" ? "Workflows" : settingsSection === "projects" ? "Projects" : settingsSection === "skills" ? "Skills" : settingsSection === "tools" ? "Tools & MCP" : "Updates"}</span><small>{settingsSection === "general" ? "Appearance, runtime behavior, and diagnostics" : settingsSection === "models" ? "Providers, credentials, and model routing" : settingsSection === "prompts" ? "Your complete harness instruction and reusable profiles" : settingsSection === "agents" ? "Delegation limits and specialist configurations" : settingsSection === "workflows" ? "Reusable project actions and scheduled tasks" : settingsSection === "projects" ? "Per-project model, permission, and prompt overrides" : settingsSection === "skills" ? "Local Markdown workflows with model-facing invocation names" : settingsSection === "tools" ? "Model Context Protocol servers and live tool controls" : "Secure releases delivered directly from the OpenKiwi repository"}</small></div>
+          {settingsSection === "general" &&
+          <section className="settings-section getting-started-settings">
+            <div className="settings-section-heading settings-heading-with-action">
+              <div className="settings-icon"><Sparkles size={17} /></div>
+              <div><h3>Getting started</h3><p>Review model setup, projects and chats, permissions, and local skills.</p></div>
+              <button type="button" className="secondary-button" onClick={requestOnboarding}>Run onboarding</button>
+            </div>
+          </section>}
+
           {settingsSection === "general" &&
           <section className="settings-section theme-settings-section">
             <div className="settings-section-heading settings-heading-with-action">

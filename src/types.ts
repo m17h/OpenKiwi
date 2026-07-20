@@ -5,6 +5,7 @@ export type Provider = "openai" | "openrouter";
 export type PermissionMode = "read-only" | "ask" | "full";
 export type ThemeName = "kiwi" | "midnight" | "ember" | "violet" | "daylight";
 export type WorkspaceMode = "chat" | "project";
+export type SettingsSection = "general" | "models" | "prompts" | "agents" | "workflows" | "projects" | "skills" | "tools" | "updates";
 
 export interface ProjectOverrides {
   model?: string;

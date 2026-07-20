@@ -76,7 +76,7 @@ import { ApprovalCenter } from "./components/ApprovalCenter";
 import { Composer, type ComposerHandle } from "./components/Composer";
 import { CommandPalette } from "./components/CommandPalette";
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import { SettingsModal, type SettingsSection } from "./components/SettingsModal";
+import { SettingsModal } from "./components/SettingsModal";
 import { AuthRequiredModal, RuntimeSetupModal } from "./components/RuntimeModals";
 import type {
   AgentRecord,
@@ -99,6 +99,7 @@ import type {
   PromptProfile,
   ScheduledTask,
   ScheduleRunRecord,
+  SettingsSection,
   Thread,
   Turn,
   ThemeName,
@@ -112,6 +113,7 @@ import { useAppUpdater } from "./lib/appUpdater";
 import { useCodexEvents } from "./hooks/useCodexEvents";
 import { useScheduler } from "./hooks/useScheduler";
 import { useTerminal } from "./hooks/useTerminal";
+import { isEstablishedOpenKiwiInstall, ONBOARDING_EXIT_MS, ONBOARDING_VERSION } from "./lib/onboarding";
 import {
   createLocalSkill,
   importLocalSkills,
@@ -125,6 +127,7 @@ import {
 
 const ChatTimeline = lazy(() => import("./components/ChatTimeline").then((module) => ({ default: module.ChatTimeline })));
 const StudioDock = lazy(() => import("./components/StudioDock").then((module) => ({ default: module.StudioDock })));
+const OnboardingModal = lazy(() => import("./components/OnboardingModal").then((module) => ({ default: module.OnboardingModal })));
 
 const EMPTY_MESSAGES: ChatMessage[] = [];
 const EMPTY_ACTIVITIES: Activity[] = [];
@@ -133,6 +136,14 @@ const EMPTY_AGENTS: AgentRecord[] = [];
 const initialProjects = loadStored<Project[]>("kiwi.projects", []).sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
 const initialWorkspaceMode: WorkspaceMode = loadStored<WorkspaceMode>("kiwi.workspaceMode", initialProjects.length ? "project" : "chat");
 const initialKnownThreads = pruneSidebarIndex(loadStored<ThreadSidebarIndex>("kiwi.knownThreads", {}));
+const initialOnboardingVersion = loadStored<number>("kiwi.onboardingVersion", 0);
+const establishedInstall = isEstablishedOpenKiwiInstall({
+  projects: initialProjects.length,
+  knownThreads: Object.keys(initialKnownThreads).length,
+  hasStoredSettings: localStorage.getItem("kiwi.settings") !== null,
+  hasSkillsFolder: Boolean(loadStored<string>("kiwi.skillsFolder", "")),
+});
+const initialOnboardingOpen = initialOnboardingVersion < ONBOARDING_VERSION && !establishedInstall;
 const storedSettings = loadStored<Partial<AppSettings>>("kiwi.settings", {});
 const initialSettings: AppSettings = {
   ...DEFAULT_SETTINGS,
@@ -219,6 +230,9 @@ export default function App() {
   const [scheduleRuns, setScheduleRuns] = useState<ScheduleRunRecord[]>(() => loadStored("kiwi.scheduleRuns", []));
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsInitialSection, setSettingsInitialSection] = useState<SettingsSection>("general");
+  const [onboardingOpen, setOnboardingOpen] = useState(initialOnboardingOpen);
+  const [onboardingMounted, setOnboardingMounted] = useState(initialOnboardingOpen);
+  const onboardingExitTimerRef = useRef<number | null>(null);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [threadSearch, setThreadSearch] = useState("");
   const [convSearchOpen, setConvSearchOpen] = useState(false);
@@ -470,6 +484,34 @@ export default function App() {
   const closeSettings = useCallback(() => {
     setPreviewTheme(null);
     setSettingsOpen(false);
+  }, []);
+
+  const completeOnboarding = useCallback(() => {
+    storeValue("kiwi.onboardingVersion", ONBOARDING_VERSION);
+    setOnboardingOpen(false);
+    if (onboardingExitTimerRef.current !== null) window.clearTimeout(onboardingExitTimerRef.current);
+    onboardingExitTimerRef.current = window.setTimeout(() => {
+      onboardingExitTimerRef.current = null;
+      setOnboardingMounted(false);
+    }, ONBOARDING_EXIT_MS);
+  }, []);
+
+  const openOnboarding = useCallback(() => {
+    if (onboardingExitTimerRef.current !== null) {
+      window.clearTimeout(onboardingExitTimerRef.current);
+      onboardingExitTimerRef.current = null;
+    }
+    setOnboardingMounted(true);
+    requestAnimationFrame(() => setOnboardingOpen(true));
+  }, []);
+
+  useEffect(() => () => {
+    if (onboardingExitTimerRef.current !== null) window.clearTimeout(onboardingExitTimerRef.current);
+  }, []);
+
+  const startNormalChat = useCallback(() => {
+    setWorkspaceMode("chat");
+    storeValue("kiwi.workspaceMode", "chat");
   }, []);
 
   const persistArchivedThreads = useCallback((update: (current: ArchivedThread[]) => ArchivedThread[]) => {
@@ -821,7 +863,10 @@ export default function App() {
 
   useEffect(() => {
     void getNormalChatWorkspace().then(setChatWorkspacePath).catch((reason) => setError(friendlyError(reason)));
-    void checkRuntime(true).then((runtime) => {
+    if (!initialOnboardingOpen && initialOnboardingVersion < ONBOARDING_VERSION) {
+      storeValue("kiwi.onboardingVersion", ONBOARDING_VERSION);
+    }
+    void checkRuntime(!initialOnboardingOpen).then((runtime) => {
       if (!runtime.available) return;
       void refreshAccount();
       void refreshModels();
@@ -1700,7 +1745,7 @@ export default function App() {
 
   shortcutStateRef.current = {
     running: Boolean(running && activeThread),
-    modalOpen: settingsOpen || commandPaletteOpen || runtimeSetupOpen || authRequiredOpen || Boolean(pendingApproval) || permissionOpen,
+    modalOpen: onboardingOpen || settingsOpen || commandPaletteOpen || runtimeSetupOpen || authRequiredOpen || Boolean(pendingApproval) || permissionOpen,
     threadOpen: Boolean(activeThreadId),
     stopTurn: () => void stopTurn(),
     newThread,
@@ -2236,7 +2281,21 @@ export default function App() {
         onCreateSkill={createSkill}
         onRenameSkill={renameSkill}
         onToggleSkill={toggleSkill}
+        onOpenOnboarding={() => { closeSettings(); openOnboarding(); }}
       />
+
+      {onboardingMounted && <Suspense fallback={null}><OnboardingModal
+        open={onboardingOpen}
+        runtimeStatus={runtimeStatus}
+        account={account}
+        openRouterReady={openRouterReady}
+        skillsFolder={skillsFolder}
+        onComplete={completeOnboarding}
+        onOpenSettings={(section) => openSettings(section)}
+        onChooseSkillsFolder={() => void chooseSkillsFolder()}
+        onAddProject={() => void addProject()}
+        onStartChat={startNormalChat}
+      /></Suspense>}
 
       <RuntimeSetupModal
         open={runtimeSetupOpen}

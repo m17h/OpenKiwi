@@ -56,6 +56,7 @@ function modalProps(overrides: Partial<Parameters<typeof SettingsModal>[0]> = {}
     onRenameSkill: vi.fn(() => true),
     onToggleSkill: vi.fn(),
     onProjects: vi.fn(),
+    onOpenOnboarding: vi.fn(),
     ...overrides,
   };
 }
@@ -95,5 +96,13 @@ describe("SettingsModal", () => {
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(onClose).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
+  });
+
+  it("offers the onboarding guide again from General settings", () => {
+    const onOpenOnboarding = vi.fn();
+    render(<SettingsModal {...modalProps({ onOpenOnboarding })} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Run onboarding" }));
+    expect(onOpenOnboarding).toHaveBeenCalledOnce();
   });
 });

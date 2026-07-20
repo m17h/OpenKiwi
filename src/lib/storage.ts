@@ -21,6 +21,7 @@ export const DURABLE_STORAGE_KEYS = [
   "kiwi.scheduleRuns",
   "kiwi.costLedger",
   "kiwi.paneSizes",
+  "kiwi.onboardingVersion",
 ] as const;
 
 /**
