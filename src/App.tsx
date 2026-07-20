@@ -70,6 +70,8 @@ import {
 } from "./lib/threadList";
 import { timelineFromTurns } from "./lib/threadTimeline";
 import { buildTranscriptMarkdown } from "./lib/transcript";
+import { timeAgo } from "./lib/timeAgo";
+import { RowMenu } from "./components/RowMenu";
 import { type ReasoningEffort, ModelPowerControl, type RuntimeModel } from "./components/ModelPowerControl";
 import { OpenRouterModelControl, type OpenRouterModel } from "./components/OpenRouterModelControl";
 import { ApprovalCenter } from "./components/ApprovalCenter";
@@ -1787,41 +1789,33 @@ export default function App() {
           </button>
         </div>
 
-        <button className={`new-thread-button contextual ${workspaceMode}`} onClick={newThread} disabled={!activeWorkspace}>
+        <button className="new-thread-button" onClick={newThread} disabled={!activeWorkspace} title={activeWorkspace?.isChat ? "Start a chat without a project folder" : activeProject ? `Start a thread in ${activeProject.name}` : "Select a workspace first"}>
           <Plus size={16} />
-          <span className="new-thread-copy">
-            <strong>{workspaceMode === "chat" ? "New normal chat" : "New project thread"}</strong>
-            <small>{workspaceMode === "chat" ? "No project folder" : activeProject?.name ?? "Select a project"}</small>
-          </span>
+          <span>New thread</span>
+          <kbd>⌘N</kbd>
         </button>
 
-        <div className="sidebar-section chats-section">
+        <div className="sidebar-section workspaces-section">
           <div className="section-label-row">
-            <span className="section-label">Chats</span>
-          </div>
-          <button
-            className={`chat-scope-row ${workspaceMode === "chat" ? "active" : ""}`}
-            onClick={() => {
-              setWorkspaceMode("chat");
-              storeValue("kiwi.workspaceMode", "chat");
-            }}
-          >
-            <span className="chat-scope-icon"><MessageSquare size={15} /></span>
-            <span><strong>Normal chats</strong><small>No project folder attached</small></span>
-            {workspaceMode === "chat" && <Check size={14} />}
-          </button>
-        </div>
-
-        <div className="sidebar-section projects-section">
-          <div className="section-label-row">
-            <span className="section-label">Projects</span>
+            <span className="section-label">Workspaces</span>
             <button className="icon-button tiny" onClick={addProject} title="Add project" aria-label="Add project"><Plus size={14} /></button>
           </div>
-          <div className="project-list">
+          <div className="workspace-list">
+            <button
+              className={`workspace-row chat ${workspaceMode === "chat" ? "active" : ""}`}
+              onClick={() => {
+                setWorkspaceMode("chat");
+                storeValue("kiwi.workspaceMode", "chat");
+              }}
+              title="Conversations without a project folder"
+            >
+              <span className="workspace-icon chat"><MessageSquare size={14} /></span>
+              <span className="workspace-name">Chats</span>
+            </button>
             {projects.map((project) => (
-              <div key={project.id} className={`project-row-wrap ${workspaceMode === "project" && project.id === activeProjectId ? "active" : ""}`}>
+              <div key={project.id} className={`workspace-row-wrap ${workspaceMode === "project" && project.id === activeProjectId ? "active" : ""}`}>
                 <button
-                  className="project-row"
+                  className="workspace-row"
                   onClick={() => {
                     setActiveProjectId(project.id);
                     setWorkspaceMode("project");
@@ -1829,17 +1823,18 @@ export default function App() {
                   }}
                   title={project.path}
                 >
-                  {project.pinned ? <Pin className="project-pin-mark" size={14} /> : <Folder size={15} />}
-                  <span>{project.name}</span>
+                  <span className="workspace-icon">{project.pinned ? <Pin size={13} /> : <Folder size={14} />}</span>
+                  <span className="workspace-name">{project.name}</span>
                 </button>
-                <div className="project-actions">
-                  <button onClick={() => toggleProjectPin(project)} title={project.pinned ? "Unpin project" : "Pin project"} aria-label={`${project.pinned ? "Unpin" : "Pin"} ${project.name}`}>
-                    {project.pinned ? <PinOff size={12} /> : <Pin size={12} />}
-                  </button>
-                  <button className="danger" onClick={() => removeProject(project)} title="Remove from OpenKiwi — files stay on your Mac" aria-label={`Remove ${project.name} from OpenKiwi`}>
-                    <Trash2 size={12} />
-                  </button>
-                </div>
+                <RowMenu
+                  label={`Options for ${project.name}`}
+                  scale={(settings.uiScale || 100) / 100}
+                  items={[
+                    { label: project.pinned ? "Unpin project" : "Pin project", icon: project.pinned ? <PinOff size={13} /> : <Pin size={13} />, onSelect: () => toggleProjectPin(project) },
+                    { label: "Project settings", icon: <Settings size={13} />, onSelect: () => openSettings("projects") },
+                    { label: "Remove from OpenKiwi", icon: <Trash2 size={13} />, danger: true, onSelect: () => removeProject(project) },
+                  ]}
+                />
               </div>
             ))}
             {!projects.length && (
@@ -1853,14 +1848,10 @@ export default function App() {
 
         <div className="sidebar-section threads-section">
           <div className="section-label-row">
-            <span className="section-label">{workspaceMode === "chat" ? "Chat threads" : "Project threads"}</span>
-            {activeWorkspace && <span className="thread-count">{threads.length}</span>}
+            <span className="section-label">Threads</span>
+            {activeWorkspace && threads.length > 0 && <span className="thread-count">{threads.length}</span>}
           </div>
-          {activeWorkspace && <label className="thread-search"><Search size={11} /><input value={threadSearch} onChange={(event) => setThreadSearch(event.target.value)} placeholder="Search threads…" /></label>}
-          <div className={`thread-scope-hint ${workspaceMode}`}>
-            {workspaceMode === "chat" ? <MessageSquare size={12} /> : <Folder size={12} />}
-            <span>{workspaceMode === "chat" ? "Not tied to a project folder" : activeProject ? `Working in ${activeProject.name}` : "Select a project above"}</span>
-          </div>
+          {activeWorkspace && <label className="thread-search"><Search size={11} /><input value={threadSearch} onChange={(event) => setThreadSearch(event.target.value)} placeholder={`Search ${workspaceMode === "chat" ? "chats" : activeProject?.name ?? "threads"}…`} /></label>}
           <div className="thread-list">
             {displayedThreads.map((thread) => (
               <div key={thread.id} className={`thread-row-wrap ${activeThread?.id === thread.id ? "active" : ""}`}>
@@ -1887,14 +1878,19 @@ export default function App() {
                     {pinnedThreadIds.includes(thread.id) ? <Pin size={13} /> : <MessageSquare size={14} />}
                     <span>{thread.name || thread.preview || "Untitled thread"}</span>
                     <ThreadRowBadge threadId={thread.id} />
+                    <time className="thread-time">{timeAgo(thread.updatedAt)}</time>
                   </button>
                 )}
-                <div className="thread-actions">
-                  <button onMouseDown={(event) => event.preventDefault()} onClick={() => toggleThreadPin(thread.id)} title={pinnedThreadIds.includes(thread.id) ? "Unpin thread" : "Pin thread"} aria-label={`${pinnedThreadIds.includes(thread.id) ? "Unpin" : "Pin"} ${thread.name || thread.preview || "thread"}`}><Pin size={12} /></button>
-                  <button onMouseDown={(event) => event.preventDefault()} onClick={() => startThreadRename(thread)} title="Rename thread" aria-label={`Rename ${thread.name || thread.preview || "thread"}`}><Pencil size={12} /></button>
-                  <button onMouseDown={(event) => event.preventDefault()} onClick={() => void archiveThread(thread)} title="Archive thread" aria-label={`Archive ${thread.name || thread.preview || "thread"}`}><Archive size={12} /></button>
-                  <button className="danger" onMouseDown={(event) => event.preventDefault()} onClick={() => void deleteThreadForever(thread.id, thread.name || thread.preview || "Untitled thread")} title="Delete thread permanently" aria-label={`Permanently delete ${thread.name || thread.preview || "thread"}`}><Trash2 size={12} /></button>
-                </div>
+                <RowMenu
+                  label={`Options for ${thread.name || thread.preview || "thread"}`}
+                  scale={(settings.uiScale || 100) / 100}
+                  items={[
+                    { label: pinnedThreadIds.includes(thread.id) ? "Unpin" : "Pin", icon: pinnedThreadIds.includes(thread.id) ? <PinOff size={13} /> : <Pin size={13} />, onSelect: () => toggleThreadPin(thread.id) },
+                    { label: "Rename", icon: <Pencil size={13} />, onSelect: () => startThreadRename(thread) },
+                    { label: "Archive", icon: <Archive size={13} />, onSelect: () => void archiveThread(thread) },
+                    { label: "Delete forever", icon: <Trash2 size={13} />, danger: true, onSelect: () => void deleteThreadForever(thread.id, thread.name || thread.preview || "Untitled thread") },
+                  ]}
+                />
               </div>
             ))}
             {activeWorkspace && !threads.length && <div className="empty-threads">{workspaceMode === "chat" ? "No normal chats yet" : "No threads in this project yet"}</div>}
@@ -1913,10 +1909,14 @@ export default function App() {
                     <Archive size={13} />
                     <span>{record.label}</span>
                   </span>
-                  <div className="thread-actions">
-                    <button onClick={() => void unarchiveThread(record)} title="Restore thread" aria-label={`Restore ${record.label}`}><ArchiveRestore size={12} /></button>
-                    <button className="danger" onClick={() => void deleteThreadForever(record.id, record.label)} title="Delete thread permanently" aria-label={`Permanently delete ${record.label}`}><Trash2 size={12} /></button>
-                  </div>
+                  <RowMenu
+                    label={`Options for archived ${record.label}`}
+                    scale={(settings.uiScale || 100) / 100}
+                    items={[
+                      { label: "Restore", icon: <ArchiveRestore size={13} />, onSelect: () => void unarchiveThread(record) },
+                      { label: "Delete forever", icon: <Trash2 size={13} />, danger: true, onSelect: () => void deleteThreadForever(record.id, record.label) },
+                    ]}
+                  />
                 </div>
               ))}
             </div>
