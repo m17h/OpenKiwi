@@ -2,7 +2,7 @@
 
 OpenKiwi is a fast, local-first desktop coding harness with a user-owned instruction prompt. It supports OpenAI through an official ChatGPT subscription sign-in flow and OpenRouter through a user-supplied API key.
 
-This repository contains a runnable desktop coding environment: normal chats, folder-bound project threads, concurrent background tasks, steering and interruption, three permission modes, typed approvals and user-input requests, an explicit empty-by-default instruction prompt, opt-in harness-level sub-agents, prompt/agent profiles, scheduled tasks, animated model controls, and an integrated workspace studio.
+This repository contains a runnable desktop coding environment: normal chats, folder-bound project threads, concurrent background tasks, steering and interruption, three permission modes, typed approvals and user-input requests, an explicit empty-by-default instruction prompt, opt-in harness-level sub-agents, prompt/agent profiles, multi-step agent workflows, animated model controls, and an integrated workspace studio.
 
 ## Why this architecture
 
@@ -93,6 +93,19 @@ Sub-agents are disabled by default. For a new thread, use the composer toggle or
 - Spawn, interaction, wait, close, and interruption activity appears in the thread timeline.
 
 OpenKiwi does not add a hidden instruction telling the model to delegate. The toggle controls tool availability at the harness layer.
+
+## Agent workflows
+
+**Settings → Workflows** can build reusable, project-bound recipes from ordered agent prompts and deterministic shell commands.
+
+- Workflows run manually, on a recurring interval, or once when OpenKiwi starts.
+- Every run creates a named project thread, so prompts, model output, commands, and results remain inspectable.
+- Agent steps run sequentially in that thread and may expose selected local skills by their visible `$name`.
+- The workflow captures its provider, model, reasoning, permission, prompt, and sub-agent settings when saved. The editor can refresh that snapshot from the current composer settings.
+- Each step can stop the recipe on failure or explicitly continue. Run history records progress, completion, failure, and the resulting thread.
+- Manual workflows containing shell commands require confirmation before execution. Background runs never request interactive approval and still obey the saved sandbox.
+
+Existing one-click project actions and single-prompt schedules remain available for lightweight use. A saved schedule can be converted to the richer workflow format without removing the original.
 
 ## Model and reasoning control
 

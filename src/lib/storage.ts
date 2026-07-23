@@ -19,6 +19,8 @@ export const DURABLE_STORAGE_KEYS = [
   "kiwi.disabledSkills",
   "kiwi.drafts",
   "kiwi.scheduleRuns",
+  "kiwi.workflows",
+  "kiwi.workflowRuns",
   "kiwi.costLedger",
   "kiwi.paneSizes",
   "kiwi.onboardingVersion",

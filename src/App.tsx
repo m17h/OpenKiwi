@@ -114,6 +114,7 @@ import { useCodexEvents } from "./hooks/useCodexEvents";
 import { useScheduler } from "./hooks/useScheduler";
 import { useTerminal } from "./hooks/useTerminal";
 import { usePaneResize } from "./hooks/usePaneResize";
+import { useWorkflowEngine } from "./hooks/useWorkflowEngine";
 import { isEstablishedOpenKiwiInstall, ONBOARDING_EXIT_MS, ONBOARDING_VERSION } from "./lib/onboarding";
 import {
   createLocalSkill,
@@ -125,6 +126,7 @@ import {
   type LocalSkill,
   type LocalSkillFile,
 } from "./lib/skills";
+import type { WorkflowDefinition, WorkflowRunRecord } from "./lib/workflows";
 
 const ChatTimeline = lazy(() => import("./components/ChatTimeline").then((module) => ({ default: module.ChatTimeline })));
 const StudioDock = lazy(() => import("./components/StudioDock").then((module) => ({ default: module.StudioDock })));
@@ -229,6 +231,8 @@ export default function App() {
   const [projectActions, setProjectActions] = useState<ProjectAction[]>(() => loadStored("kiwi.projectActions", []));
   const [scheduledTasks, setScheduledTasks] = useState<ScheduledTask[]>(() => loadStored("kiwi.scheduledTasks", []));
   const [scheduleRuns, setScheduleRuns] = useState<ScheduleRunRecord[]>(() => loadStored("kiwi.scheduleRuns", []));
+  const [workflows, setWorkflows] = useState<WorkflowDefinition[]>(() => loadStored("kiwi.workflows", []));
+  const [workflowRuns, setWorkflowRuns] = useState<WorkflowRunRecord[]>(() => loadStored("kiwi.workflowRuns", []));
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsInitialSection, setSettingsInitialSection] = useState<SettingsSection>("general");
   const [onboardingOpen, setOnboardingOpen] = useState(initialOnboardingOpen);
@@ -1734,6 +1738,54 @@ export default function App() {
     });
   }, []);
 
+  const persistWorkflows = useCallback((next: WorkflowDefinition[]) => {
+    setWorkflows(next);
+    storeValue("kiwi.workflows", next);
+  }, []);
+
+  const updateWorkflow = useCallback((id: string, patch: (current: WorkflowDefinition) => WorkflowDefinition) => {
+    setWorkflows((current) => {
+      const next = current.map((workflow) => workflow.id === id ? patch(workflow) : workflow);
+      storeValue("kiwi.workflows", next);
+      return next;
+    });
+  }, []);
+
+  const recordWorkflowRun = useCallback((run: WorkflowRunRecord) => {
+    setWorkflowRuns((current) => {
+      const existing = current.findIndex((item) => item.id === run.id);
+      const next = existing >= 0
+        ? current.map((item) => item.id === run.id ? run : item)
+        : [run, ...current].slice(0, 100);
+      storeValue("kiwi.workflowRuns", next);
+      return next;
+    });
+  }, []);
+
+  const { runWorkflow } = useWorkflowEngine({
+    workflows,
+    projects,
+    runtimeAvailable: Boolean(runtimeStatus?.available),
+    chatGptConnected: account?.type === "chatgpt",
+    openRouterReady,
+    customAgents,
+    ensureSkillRoots,
+    bindThreadToProject,
+    updateWorkflow,
+    recordRun: recordWorkflowRun,
+    onThreadStarted: (project, threadId, source) => {
+      if (source === "manual") {
+        setActiveProjectId(project.id);
+        setWorkspaceMode("project");
+        storeValue("kiwi.workspaceMode", "project");
+        void openAgent(threadId);
+      } else if (activeProject?.id === project.id) {
+        void loadThreads(project);
+      }
+    },
+    onError: (message) => setError(message),
+  });
+
   useScheduler({
     schedules: scheduledTasks,
     updateSchedule,
@@ -2233,6 +2285,8 @@ export default function App() {
         agents={customAgents}
         actions={projectActions}
         schedules={scheduledTasks}
+        workflows={workflows}
+        workflowRuns={workflowRuns}
         projects={projects}
         skillsFolder={skillsFolder}
         skills={skills}
@@ -2245,6 +2299,11 @@ export default function App() {
         onAgents={(value) => { setCustomAgents(value); storeValue("kiwi.customAgents", value); }}
         onActions={(value) => { setProjectActions(value); storeValue("kiwi.projectActions", value); }}
         onSchedules={(value) => { setScheduledTasks(value); storeValue("kiwi.scheduledTasks", value); }}
+        onWorkflows={persistWorkflows}
+        onRunWorkflow={async (workflowId) => {
+          closeSettings();
+          await runWorkflow(workflowId, "manual");
+        }}
         onProjects={(value) => { setProjects(value); storeValue("kiwi.projects", value); }}
         scheduleRuns={scheduleRuns}
         onOpenRun={(threadId) => { closeSettings(); void openAgent(threadId); }}

@@ -1,25 +1,34 @@
 import { useState } from "react";
-import { Bot, Check, Clock3, Play, Plus, Save, Sparkles, Trash2, Wrench } from "lucide-react";
+import { Bot, Check, Clock3, Play, Plus, Save, Sparkles, Trash2, Workflow, Wrench } from "lucide-react";
 import type { AppSettings, CustomAgentProfile, Project, ProjectAction, PromptProfile, ScheduledTask, ScheduleRunRecord } from "../types";
 import { rpc } from "../lib/codex";
 import { friendlyError } from "../lib/errors";
 import { scheduleRunSnapshot } from "../lib/turnConfig";
+import type { LocalSkill } from "../lib/skills";
+import type { WorkflowDefinition, WorkflowRunRecord } from "../lib/workflows";
+import { workflowFromSchedule } from "../lib/workflows";
+import { WorkflowManager } from "./WorkflowManager";
 
 export interface McpServerView { name: string; status: string; tools: number }
 
-export function HarnessSettings({ section, settings, profiles, agents, actions, schedules, projects, onSettings, onProfiles, onAgents, onActions, onSchedules, mcpServers = [], onMcpChanged, scheduleRuns = [], onOpenRun }: {
+export function HarnessSettings({ section, settings, profiles, agents, actions, schedules, workflows, workflowRuns, projects, skills, onSettings, onProfiles, onAgents, onActions, onSchedules, onWorkflows, onRunWorkflow, mcpServers = [], onMcpChanged, scheduleRuns = [], onOpenRun }: {
   section: "prompts" | "agents" | "workflows" | "tools";
   settings: AppSettings;
   profiles: PromptProfile[];
   agents: CustomAgentProfile[];
   actions: ProjectAction[];
   schedules: ScheduledTask[];
+  workflows: WorkflowDefinition[];
+  workflowRuns: WorkflowRunRecord[];
   projects: Project[];
+  skills: LocalSkill[];
   onSettings: (value: AppSettings) => void;
   onProfiles: (value: PromptProfile[]) => void;
   onAgents: (value: CustomAgentProfile[]) => void;
   onActions: (value: ProjectAction[]) => void;
   onSchedules: (value: ScheduledTask[]) => void;
+  onWorkflows: (value: WorkflowDefinition[]) => void;
+  onRunWorkflow: (workflowId: string) => Promise<void> | void;
   mcpServers?: McpServerView[];
   onMcpChanged?: () => void;
   scheduleRuns?: ScheduleRunRecord[];
@@ -62,15 +71,26 @@ export function HarnessSettings({ section, settings, profiles, agents, actions, 
     </section>}
 
     {section === "workflows" && <>
+    <WorkflowManager
+      workflows={workflows}
+      runs={workflowRuns}
+      projects={projects}
+      skills={skills}
+      settings={settings}
+      onWorkflows={onWorkflows}
+      onRun={onRunWorkflow}
+      onOpenRun={onOpenRun}
+    />
+
     <section className="settings-section">
-      <div className="settings-section-heading"><div className="settings-icon"><Play size={17} /></div><div><h3>Project actions</h3><p>Create one-click commands that run in the selected project with its permission policy.</p></div></div>
+      <div className="settings-section-heading"><div className="settings-icon"><Play size={17} /></div><div><h3>Quick project actions</h3><p>Keep lightweight one-click commands for the Workspace panel. Use an agent workflow when you need multiple ordered steps, triggers, skills, or run history.</p></div></div>
       <div className="manager-list">{actions.map((action) => <div key={action.id}><Play size={12} /><span><strong>{action.name}</strong><small>{action.command}</small></span><button className="manager-delete" aria-label={`Delete ${action.name}`} onClick={() => { if (window.confirm(`Delete the project action “${action.name}”?`)) onActions(actions.filter((item) => item.id !== action.id)); }}><Trash2 size={12} /></button></div>)}</div>
       <div className="inline-create two"><input value={actionName} onChange={(event) => setActionName(event.target.value)} placeholder="Action name" /><input value={actionCommand} onChange={(event) => setActionCommand(event.target.value)} placeholder="Command" /><button onClick={() => { if (!actionName.trim() || !actionCommand.trim()) return; onActions([...actions, { id: crypto.randomUUID(), name: actionName.trim(), command: actionCommand.trim() }]); setActionName(""); setActionCommand(""); }}><Plus size={12} /> Add</button></div>
     </section>
 
     <section className="settings-section">
-      <div className="settings-section-heading"><div className="settings-icon"><Clock3 size={17} /></div><div><h3>Scheduled tasks</h3><p>Run a prompt on an interval while OpenKiwi is open. Every run creates a traceable project thread using the model, prompt, and permissions captured when the schedule is saved. Scheduled runs never pause for approval, so "Ask to act" behaves like workspace-write.</p></div></div>
-      <div className="manager-list">{schedules.map((schedule) => <div key={schedule.id}><button className={`mini-toggle ${schedule.enabled ? "on" : ""}`} aria-label={`${schedule.enabled ? "Disable" : "Enable"} ${schedule.name}`} aria-pressed={schedule.enabled} onClick={() => onSchedules(schedules.map((item) => item.id === schedule.id ? { ...item, enabled: !item.enabled, nextRunAt: Date.now() + item.intervalMinutes * 60_000 } : item))}><span /></button><span><strong>{schedule.name}</strong><small>Every {schedule.intervalMinutes} min · {projects.find((project) => project.id === schedule.projectId)?.name ?? "No project"}</small></span><button className="manager-delete" aria-label={`Delete ${schedule.name}`} onClick={() => { if (window.confirm(`Delete the scheduled task “${schedule.name}”? It will stop running.`)) onSchedules(schedules.filter((item) => item.id !== schedule.id)); }}><Trash2 size={12} /></button></div>)}</div>
+      <div className="settings-section-heading"><div className="settings-icon"><Clock3 size={17} /></div><div><h3>Simple scheduled prompts</h3><p>Existing single-prompt schedules remain fully supported. New agent workflows add multi-step recipes, commands, skills, app-start triggers, and richer run history.</p></div></div>
+      <div className="manager-list scheduled-workflow-list">{schedules.map((schedule) => <div key={schedule.id}><button className={`mini-toggle ${schedule.enabled ? "on" : ""}`} aria-label={`${schedule.enabled ? "Disable" : "Enable"} ${schedule.name}`} aria-pressed={schedule.enabled} onClick={() => onSchedules(schedules.map((item) => item.id === schedule.id ? { ...item, enabled: !item.enabled, nextRunAt: Date.now() + item.intervalMinutes * 60_000 } : item))}><span /></button><span><strong>{schedule.name}</strong><small>Every {schedule.intervalMinutes} min · {projects.find((project) => project.id === schedule.projectId)?.name ?? "No project"}</small></span><span className="manager-row-actions"><button title={`Convert ${schedule.name} to an agent workflow`} aria-label={`Convert ${schedule.name} to workflow`} disabled={!schedule.projectId} onClick={() => onWorkflows([workflowFromSchedule(schedule, scheduleRunSnapshot(settings)), ...workflows])}><Workflow size={11} /></button><button className="manager-delete" aria-label={`Delete ${schedule.name}`} onClick={() => { if (window.confirm(`Delete the scheduled task “${schedule.name}”? It will stop running.`)) onSchedules(schedules.filter((item) => item.id !== schedule.id)); }}><Trash2 size={12} /></button></span></div>)}</div>
       {scheduleRuns.length > 0 && (
         <>
           <h3 className="panel-label">Recent runs</h3>

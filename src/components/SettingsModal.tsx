@@ -27,6 +27,7 @@ import { DEFAULT_OPENAI_MODEL, DEFAULT_SETTINGS, RELEASE_NOTES_URL, THEMES } fro
 import { friendlyError } from "../lib/errors";
 import { updateProgress, type AppUpdater } from "../lib/appUpdater";
 import type { LocalSkill } from "../lib/skills";
+import type { WorkflowDefinition, WorkflowRunRecord } from "../lib/workflows";
 import { HarnessSettings } from "./HarnessSettings";
 import { SkillLibrary } from "./SkillLibrary";
 import type { McpView } from "./StudioDock";
@@ -65,6 +66,8 @@ export function SettingsModal({
   agents,
   actions,
   schedules,
+  workflows,
+  workflowRuns,
   projects,
   skillsFolder,
   skills,
@@ -77,6 +80,8 @@ export function SettingsModal({
   onAgents,
   onActions,
   onSchedules,
+  onWorkflows,
+  onRunWorkflow,
   onProjects,
   scheduleRuns = [],
   onOpenRun,
@@ -108,6 +113,8 @@ export function SettingsModal({
   agents: CustomAgentProfile[];
   actions: ProjectAction[];
   schedules: ScheduledTask[];
+  workflows: WorkflowDefinition[];
+  workflowRuns: WorkflowRunRecord[];
   projects: Project[];
   skillsFolder: string;
   skills: LocalSkill[];
@@ -120,6 +127,8 @@ export function SettingsModal({
   onAgents: (value: CustomAgentProfile[]) => void;
   onActions: (value: ProjectAction[]) => void;
   onSchedules: (value: ScheduledTask[]) => void;
+  onWorkflows: (value: WorkflowDefinition[]) => void;
+  onRunWorkflow: (workflowId: string) => Promise<void> | void;
   onProjects: (value: Project[]) => void;
   scheduleRuns?: ScheduleRunRecord[];
   onOpenRun?: (threadId: string) => void;
@@ -251,7 +260,7 @@ export function SettingsModal({
             ] as const).map(([id, label, Icon]) => <button key={id} className={settingsSection === id ? "active" : ""} onClick={() => setSettingsSection(id)} aria-current={settingsSection === id ? "page" : undefined}><Icon size={14} /><span>{label}</span><ChevronRight size={12} /></button>)}
           </nav>
           <div className="settings-content">
-          <div className="settings-pane-heading"><span>{settingsSection === "general" ? "General" : settingsSection === "models" ? "Models & accounts" : settingsSection === "prompts" ? "Prompts" : settingsSection === "agents" ? "Agents" : settingsSection === "workflows" ? "Workflows" : settingsSection === "projects" ? "Projects" : settingsSection === "skills" ? "Skills" : settingsSection === "tools" ? "Tools & MCP" : "Updates"}</span><small>{settingsSection === "general" ? "Appearance, runtime behavior, and diagnostics" : settingsSection === "models" ? "Providers, credentials, and model routing" : settingsSection === "prompts" ? "Your complete harness instruction and reusable profiles" : settingsSection === "agents" ? "Delegation limits and specialist configurations" : settingsSection === "workflows" ? "Reusable project actions and scheduled tasks" : settingsSection === "projects" ? "Per-project model, permission, and prompt overrides" : settingsSection === "skills" ? "Local Markdown workflows with model-facing invocation names" : settingsSection === "tools" ? "Model Context Protocol servers and live tool controls" : "Secure releases delivered directly from the OpenKiwi repository"}</small></div>
+          <div className="settings-pane-heading"><span>{settingsSection === "general" ? "General" : settingsSection === "models" ? "Models & accounts" : settingsSection === "prompts" ? "Prompts" : settingsSection === "agents" ? "Agents" : settingsSection === "workflows" ? "Workflows" : settingsSection === "projects" ? "Projects" : settingsSection === "skills" ? "Skills" : settingsSection === "tools" ? "Tools & MCP" : "Updates"}</span><small>{settingsSection === "general" ? "Appearance, runtime behavior, and diagnostics" : settingsSection === "models" ? "Providers, credentials, and model routing" : settingsSection === "prompts" ? "Your complete harness instruction and reusable profiles" : settingsSection === "agents" ? "Delegation limits and specialist configurations" : settingsSection === "workflows" ? "Multi-step recipes, triggers, commands, skills, and traceable runs" : settingsSection === "projects" ? "Per-project model, permission, and prompt overrides" : settingsSection === "skills" ? "Local Markdown workflows with model-facing invocation names" : settingsSection === "tools" ? "Model Context Protocol servers and live tool controls" : "Secure releases delivered directly from the OpenKiwi repository"}</small></div>
           {settingsSection === "general" &&
           <section className="settings-section getting-started-settings">
             <div className="settings-section-heading settings-heading-with-action">
@@ -317,12 +326,17 @@ export function SettingsModal({
             agents={agents}
             actions={actions}
             schedules={schedules}
+            workflows={workflows}
+            workflowRuns={workflowRuns}
             projects={projects}
+            skills={skills}
             onSettings={setLocal}
             onProfiles={onProfiles}
             onAgents={onAgents}
             onActions={onActions}
             onSchedules={onSchedules}
+            onWorkflows={onWorkflows}
+            onRunWorkflow={onRunWorkflow}
             mcpServers={mcpServers}
             onMcpChanged={onMcpChanged}
             scheduleRuns={scheduleRuns}
