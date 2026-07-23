@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ScheduleRunSettings } from "../types";
 import {
+  compactWorkflowRun,
+  nextWorkflowFailureAt,
   nextWorkflowRunAt,
   interpolateWorkflowText,
   normalizeWorkflow,
@@ -65,6 +67,9 @@ describe("workflow definitions", () => {
 
   it("normalizes interval timing and labels", () => {
     expect(nextWorkflowRunAt({ type: "interval", intervalMinutes: 1 }, 1_000)).toBe(301_000);
+    expect(nextWorkflowFailureAt({ type: "interval", intervalMinutes: 60 }, 1, 1_000)).toBe(3_601_000);
+    expect(nextWorkflowFailureAt({ type: "interval", intervalMinutes: 60 }, 2, 1_000)).toBe(7_201_000);
+    expect(nextWorkflowFailureAt({ type: "interval", intervalMinutes: 60 }, 10, 1_000)).toBe(86_401_000);
     expect(workflowTriggerLabel({ type: "interval", intervalMinutes: 30 })).toBe("Every 30 min");
   });
 
@@ -120,7 +125,35 @@ describe("workflow definitions", () => {
     }, run, 10_000);
     expect(imported.id).toBe("00000000-0000-4000-8000-000000000001");
     expect(imported.steps[0]).toMatchObject({ id: "00000000-0000-4000-8000-000000000002", type: "agent", prompt: "Review recent changes." });
+    expect(imported.enabled).toBe(false);
     expect(imported.run).toEqual(run);
     expect(imported.nextRunAt).toBe(50_000);
+  });
+
+  it("compacts completed run output while preserving live output", () => {
+    const baseRun = {
+      id: "run-1",
+      workflowId: "workflow-1",
+      workflowName: "Release check",
+      projectId: "project-1",
+      source: "manual" as const,
+      startedAt: 1,
+      currentStep: 1,
+      stepCount: 1,
+      status: "completed" as const,
+      variables: { previousStepOutput: "abcdefghij" },
+      steps: [{
+        stepId: "step-1",
+        name: "Review",
+        type: "agent" as const,
+        status: "completed" as const,
+        attempts: 1,
+        output: "0123456789",
+      }],
+    };
+    expect(compactWorkflowRun(baseRun, 4).steps?.[0].output).toBe("…6789");
+    expect(compactWorkflowRun(baseRun, 4).variables?.previousStepOutput).toBe("…ghij");
+    expect(compactWorkflowRun({ ...baseRun, status: "running" }, 4).steps?.[0].output).toBe("0123456789");
+    expect(compactWorkflowRun({ ...baseRun, status: "running" }, 4).variables?.previousStepOutput).toBe("abcdefghij");
   });
 });

@@ -7,6 +7,8 @@ export type TaskStatus = "idle" | "starting" | "running" | "completed" | "interr
 export interface ThreadTaskState {
   threadId: string;
   activeTurnId?: string;
+  lastCompletedTurnId?: string;
+  lastCompletedTurnStatus?: TaskStatus;
   workspacePath?: string;
   status: TaskStatus;
   messages: ChatMessage[];
@@ -35,6 +37,7 @@ interface TaskStoreState {
   completeMessage: (threadId: string, message: ChatMessage) => void;
   upsertActivity: (threadId: string, activity: Activity) => void;
   setActiveTurn: (threadId: string, turnId?: string) => void;
+  completeTurn: (threadId: string, turnId: string | undefined, status: TaskStatus) => void;
   setTaskStatus: (threadId: string, status: TaskStatus, error?: string) => void;
   setDiff: (threadId: string, diff: string) => void;
   setUsage: (threadId: string, usage: TokenUsageView | null) => void;
@@ -243,6 +246,26 @@ export const useTaskStore = create<TaskStoreState>((set, get) => ({
   setActiveTurn: (threadId, turnId) => set((state) => {
     const task = state.tasks[threadId] ?? emptyTask(threadId);
     return { tasks: { ...state.tasks, [threadId]: { ...task, activeTurnId: turnId, updatedAt: Date.now() } } };
+  }),
+  completeTurn: (threadId, turnId, status) => set((state) => {
+    const task = state.tasks[threadId] ?? emptyTask(threadId);
+    const newerTurnActive = Boolean(task.activeTurnId && turnId && task.activeTurnId !== turnId);
+    const threadStatus = newerTurnActive ? task.status : status;
+    return {
+      tasks: {
+        ...state.tasks,
+        [threadId]: {
+          ...task,
+          activeTurnId: task.activeTurnId === turnId || !turnId ? undefined : task.activeTurnId,
+          lastCompletedTurnId: turnId,
+          lastCompletedTurnStatus: status,
+          status: threadStatus,
+          unread: state.activeThreadId !== threadId && threadStatus === "completed" ? true : task.unread,
+          updatedAt: Date.now(),
+        },
+      },
+      statuses: { ...state.statuses, [threadId]: threadStatus },
+    };
   }),
   setTaskStatus: (threadId, status, error) => set((state) => {
     const task = state.tasks[threadId] ?? emptyTask(threadId);

@@ -57,6 +57,17 @@ describe("task store", () => {
     expect(useTaskStore.getState().tasks["thread-b"].activeTurnId).toBe("turn-b");
   });
 
+  it("records exact turn completion without clearing a newer active turn", () => {
+    const store = useTaskStore.getState();
+    store.setActiveTurn("thread-a", "turn-new");
+    store.completeTurn("thread-a", "turn-old", "completed");
+
+    const task = useTaskStore.getState().tasks["thread-a"];
+    expect(task.activeTurnId).toBe("turn-new");
+    expect(task.lastCompletedTurnId).toBe("turn-old");
+    expect(task.lastCompletedTurnStatus).toBe("completed");
+  });
+
   it("assigns chronology once and preserves it when activity completes", () => {
     const store = useTaskStore.getState();
     store.appendUserMessage("thread-a", { id: "user", role: "user", text: "Check it" });

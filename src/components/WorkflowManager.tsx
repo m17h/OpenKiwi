@@ -332,7 +332,7 @@ export function WorkflowManager({
                 })}><Trash2 size={11} /></button>
               </div>
             ))}
-            <small className="workflow-builtins">Built in: <code>{"${projectPath}"}</code>, <code>{"${projectName}"}</code>, <code>{"${workflowName}"}</code>, <code>{"${date}"}</code>, <code>{"${previousStepStatus}"}</code>, and <code>{"${previousStepOutput}"}</code>.</small>
+            <small className="workflow-builtins">Built in: <code>{"${projectPath}"}</code>, <code>{"${projectName}"}</code>, <code>{"${workflowName}"}</code>, <code>{"${date}"}</code>, <code>{"${previousStepStatus}"}</code>, <code>{"${previousStepOutput}"}</code>, and <code>{"${previousExitCode}"}</code>.</small>
           </div>
 
           <div className="workflow-steps-heading">

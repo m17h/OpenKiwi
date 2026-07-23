@@ -1,4 +1,4 @@
-import type { ProjectAction, ScheduleRunSettings, ScheduledTask } from "../types";
+import type { ScheduleRunSettings, ScheduledTask } from "../types";
 
 export type WorkflowTrigger =
   | { type: "manual" }
@@ -55,6 +55,7 @@ export interface WorkflowDefinition {
   nextRunAt?: number;
   lastRunAt?: number;
   lastThreadId?: string;
+  consecutiveFailures?: number;
 }
 
 export type WorkflowRunStatus = "running" | "completed" | "failed" | "interrupted";
@@ -98,6 +99,20 @@ export function nextWorkflowRunAt(trigger: WorkflowTrigger, now = Date.now()): n
     : undefined;
 }
 
+export function nextWorkflowFailureAt(
+  trigger: WorkflowTrigger,
+  consecutiveFailures: number,
+  now = Date.now(),
+): number | undefined {
+  if (trigger.type !== "interval") return undefined;
+  const failures = Math.max(1, Math.floor(consecutiveFailures));
+  const delayMinutes = Math.min(
+    24 * 60,
+    Math.max(5, trigger.intervalMinutes) * (2 ** Math.min(5, failures - 1)),
+  );
+  return now + delayMinutes * 60_000;
+}
+
 export function workflowTriggerLabel(trigger: WorkflowTrigger): string {
   if (trigger.type === "interval") return `Every ${Math.max(5, trigger.intervalMinutes)} min`;
   if (trigger.type === "app-start") return "When OpenKiwi starts";
@@ -122,12 +137,33 @@ export function workflowStepRetries(step: WorkflowStep): { count: number; delayS
 export function normalizeWorkflow(workflow: WorkflowDefinition): WorkflowDefinition {
   return {
     ...workflow,
+    consecutiveFailures: Math.max(0, Math.floor(workflow.consecutiveFailures ?? 0)),
     variables: workflow.variables ?? [],
     steps: workflow.steps.map((step) => ({
       ...step,
       condition: workflowStepCondition(step),
       retryCount: workflowStepRetries(step).count,
       retryDelaySeconds: workflowStepRetries(step).delaySeconds,
+    })),
+  };
+}
+
+export function compactWorkflowRun(
+  run: WorkflowRunRecord,
+  outputLimit = 4_000,
+): WorkflowRunRecord {
+  if (run.status === "running") return run;
+  const compactOutput = (output: string | undefined) => output && output.length > outputLimit
+    ? `…${output.slice(-outputLimit)}`
+    : output;
+  return {
+    ...run,
+    variables: run.variables
+      ? { ...run.variables, previousStepOutput: compactOutput(run.variables.previousStepOutput) ?? "" }
+      : undefined,
+    steps: run.steps?.map((step) => ({
+      ...step,
+      output: compactOutput(step.output),
     })),
   };
 }
@@ -220,7 +256,9 @@ export function workflowFromSchedule(
     name: scheduled.name,
     description: "Imported from a simple scheduled task.",
     projectId: scheduled.projectId ?? "",
-    enabled: scheduled.enabled,
+    // Keep the source schedule intact for rollback, but never let the converted
+    // workflow run alongside it until the user explicitly enables the workflow.
+    enabled: false,
     trigger: { type: "interval", intervalMinutes: Math.max(5, scheduled.intervalMinutes) },
     steps: [{
       id: crypto.randomUUID(),
@@ -237,33 +275,5 @@ export function workflowFromSchedule(
     nextRunAt: scheduled.nextRunAt || nextWorkflowRunAt({ type: "interval", intervalMinutes: scheduled.intervalMinutes }, now),
     lastRunAt: scheduled.lastRunAt,
     lastThreadId: scheduled.lastThreadId,
-  };
-}
-
-export function workflowFromAction(
-  action: ProjectAction,
-  projectId: string,
-  run: ScheduleRunSettings,
-  now = Date.now(),
-): WorkflowDefinition {
-  return {
-    id: crypto.randomUUID(),
-    name: action.name,
-    description: "Imported from a project action.",
-    projectId,
-    enabled: true,
-    trigger: { type: "manual" },
-    steps: [{
-      id: crypto.randomUUID(),
-      type: "command",
-      name: action.name,
-      command: action.command,
-      continueOnError: false,
-    }],
-    skillNames: [],
-    variables: [],
-    run,
-    createdAt: now,
-    updatedAt: now,
   };
 }

@@ -270,8 +270,7 @@ export function routeCodexEvent(event: CodexEvent, ctx: CodexEventContext): void
     const taskStore = useTaskStore.getState();
     const turn = params.turn && typeof params.turn === "object" ? (params.turn as unknown as Turn) : null;
     const nextStatus = turn?.status === "interrupted" ? "interrupted" : turn?.status === "failed" ? "error" : "completed";
-    taskStore.setActiveTurn(eventThreadId, undefined);
-    taskStore.setTaskStatus(eventThreadId, nextStatus);
+    taskStore.completeTurn(eventThreadId, turn?.id, nextStatus);
     ctx.audit("turn.completed", {}, eventThreadId);
     ctx.onTurnCompleted(eventThreadId, turn);
     if (useTaskStore.getState().activeThreadId === eventThreadId) ctx.onStatus(nextStatus === "interrupted" ? "Stopped" : nextStatus === "error" ? "Task failed" : "Ready");

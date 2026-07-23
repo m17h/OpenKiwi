@@ -127,6 +127,7 @@ import {
   type LocalSkillFile,
 } from "./lib/skills";
 import {
+  compactWorkflowRun,
   normalizeWorkflows,
   recoverWorkflowRuns,
   type WorkflowDefinition,
@@ -296,7 +297,7 @@ export default function App() {
   const permissionControlRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     storeValue("kiwi.workflows", workflows);
-    storeValue("kiwi.workflowRuns", workflowRuns);
+    storeValue("kiwi.workflowRuns", workflowRuns.map((run) => compactWorkflowRun(run)));
     // Persist normalized workflow defaults and recover any run left active by
     // a previous app exit. Later updates are persisted by their own writers.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1769,7 +1770,7 @@ export default function App() {
       const next = existing >= 0
         ? current.map((item) => item.id === run.id ? run : item)
         : [run, ...current].slice(0, 100);
-      storeValue("kiwi.workflowRuns", next);
+      storeValue("kiwi.workflowRuns", next.map((item) => compactWorkflowRun(item)));
       return next;
     });
   }, []);
@@ -1799,6 +1800,10 @@ export default function App() {
   });
 
   const runWorkflowFromShortcut = useCallback(async (workflow: WorkflowDefinition) => {
+    if (workflowRuns.some((run) => run.workflowId === workflow.id && run.status === "running")) {
+      setError(`“${workflow.name}” is already running.`);
+      return;
+    }
     const variables: Record<string, string> = {};
     for (const variable of workflow.variables ?? []) {
       if (!variable.promptOnRun) {
@@ -1812,7 +1817,7 @@ export default function App() {
     const commandCount = workflow.steps.filter((step) => step.type === "command").length;
     if (commandCount && !window.confirm(`Run “${workflow.name}” now?\n\nIt contains ${commandCount} shell command${commandCount === 1 ? "" : "s"} that will run with the saved ${workflow.run.permission} permission setting.`)) return;
     await runWorkflow(workflow.id, "manual", variables);
-  }, [runWorkflow]);
+  }, [runWorkflow, workflowRuns]);
 
   useScheduler({
     schedules: scheduledTasks,

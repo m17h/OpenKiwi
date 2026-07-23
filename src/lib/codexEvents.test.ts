@@ -88,8 +88,9 @@ describe("routeCodexEvent", () => {
     expect(ctx.onStatus).toHaveBeenCalledWith("Working");
 
     routeCodexEvent({ method: "turn/completed", params: { threadId: "thread-b", turn: { id: "t1", items: [] } } }, ctx);
-    expect(useTaskStore.getState().statuses["thread-b"]).toBe("completed");
-    expect(useTaskStore.getState().tasks["thread-b"].activeTurnId).toBeUndefined();
+    expect(useTaskStore.getState().statuses["thread-b"]).toBe("running");
+    expect(useTaskStore.getState().tasks["thread-b"].activeTurnId).toBe("turn-b");
+    expect(useTaskStore.getState().tasks["thread-b"].lastCompletedTurnId).toBe("t1");
     expect(ctx.onTurnCompleted).toHaveBeenCalledWith("thread-b", { id: "t1", items: [] });
   });
 
