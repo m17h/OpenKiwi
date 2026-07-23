@@ -1,6 +1,8 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_SETTINGS } from "../lib/appConfig";
+import { scheduleRunSnapshot } from "../lib/turnConfig";
+import type { WorkflowDefinition } from "../lib/workflows";
 import { WorkflowManager } from "./WorkflowManager";
 
 const project = { id: "project-1", name: "OpenKiwi", path: "/tmp/openkiwi" };
@@ -17,6 +19,7 @@ describe("WorkflowManager", () => {
         settings={DEFAULT_SETTINGS}
         onWorkflows={onWorkflows}
         onRun={vi.fn()}
+        onStop={vi.fn()}
       />,
     );
 
@@ -52,11 +55,47 @@ describe("WorkflowManager", () => {
         settings={DEFAULT_SETTINGS}
         onWorkflows={onWorkflows}
         onRun={vi.fn()}
+        onStop={vi.fn()}
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: "New workflow" }));
     fireEvent.click(screen.getByRole("button", { name: "Save workflow" }));
     expect(screen.getByText("Give the workflow a name.")).toBeInTheDocument();
     expect(onWorkflows).not.toHaveBeenCalled();
+  });
+
+  it("collects prompted variables before a manual run", () => {
+    const onRun = vi.fn();
+    const workflow: WorkflowDefinition = {
+      id: "workflow-1",
+      name: "Release",
+      description: "Prepare a release.",
+      projectId: project.id,
+      enabled: true,
+      trigger: { type: "manual" },
+      variables: [{ id: "variable-1", name: "branch", value: "main", promptOnRun: true }],
+      steps: [{ id: "step-1", type: "command", name: "Check", command: "git status", continueOnError: false }],
+      skillNames: [],
+      run: scheduleRunSnapshot(DEFAULT_SETTINGS),
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    render(
+      <WorkflowManager
+        workflows={[workflow]}
+        runs={[]}
+        projects={[project]}
+        skills={[]}
+        settings={DEFAULT_SETTINGS}
+        onWorkflows={vi.fn()}
+        onRun={onRun}
+        onStop={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Run" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "branch" }), { target: { value: "release/next" } });
+    fireEvent.click(screen.getByRole("button", { name: "Run now" }));
+    expect(onRun).toHaveBeenCalledWith("workflow-1", { branch: "release/next" });
   });
 });

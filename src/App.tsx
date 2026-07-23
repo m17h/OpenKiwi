@@ -126,7 +126,12 @@ import {
   type LocalSkill,
   type LocalSkillFile,
 } from "./lib/skills";
-import type { WorkflowDefinition, WorkflowRunRecord } from "./lib/workflows";
+import {
+  normalizeWorkflows,
+  recoverWorkflowRuns,
+  type WorkflowDefinition,
+  type WorkflowRunRecord,
+} from "./lib/workflows";
 
 const ChatTimeline = lazy(() => import("./components/ChatTimeline").then((module) => ({ default: module.ChatTimeline })));
 const StudioDock = lazy(() => import("./components/StudioDock").then((module) => ({ default: module.StudioDock })));
@@ -231,8 +236,8 @@ export default function App() {
   const [projectActions, setProjectActions] = useState<ProjectAction[]>(() => loadStored("kiwi.projectActions", []));
   const [scheduledTasks, setScheduledTasks] = useState<ScheduledTask[]>(() => loadStored("kiwi.scheduledTasks", []));
   const [scheduleRuns, setScheduleRuns] = useState<ScheduleRunRecord[]>(() => loadStored("kiwi.scheduleRuns", []));
-  const [workflows, setWorkflows] = useState<WorkflowDefinition[]>(() => loadStored("kiwi.workflows", []));
-  const [workflowRuns, setWorkflowRuns] = useState<WorkflowRunRecord[]>(() => loadStored("kiwi.workflowRuns", []));
+  const [workflows, setWorkflows] = useState<WorkflowDefinition[]>(() => normalizeWorkflows(loadStored("kiwi.workflows", [])));
+  const [workflowRuns, setWorkflowRuns] = useState<WorkflowRunRecord[]>(() => recoverWorkflowRuns(loadStored("kiwi.workflowRuns", [])));
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsInitialSection, setSettingsInitialSection] = useState<SettingsSection>("general");
   const [onboardingOpen, setOnboardingOpen] = useState(initialOnboardingOpen);
@@ -289,6 +294,13 @@ export default function App() {
   const threadSearchRequestRef = useRef(0);
   const cancelRequestedRef = useRef(new Set<string>());
   const permissionControlRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    storeValue("kiwi.workflows", workflows);
+    storeValue("kiwi.workflowRuns", workflowRuns);
+    // Persist normalized workflow defaults and recover any run left active by
+    // a previous app exit. Later updates are persisted by their own writers.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   if (threadProjectBindingsRef.current === null) {
     threadProjectBindingsRef.current = loadStored("kiwi.threadProjects", {});
   }
@@ -1762,7 +1774,7 @@ export default function App() {
     });
   }, []);
 
-  const { runWorkflow } = useWorkflowEngine({
+  const { runWorkflow, stopWorkflow } = useWorkflowEngine({
     workflows,
     projects,
     runtimeAvailable: Boolean(runtimeStatus?.available),
@@ -1785,6 +1797,22 @@ export default function App() {
     },
     onError: (message) => setError(message),
   });
+
+  const runWorkflowFromShortcut = useCallback(async (workflow: WorkflowDefinition) => {
+    const variables: Record<string, string> = {};
+    for (const variable of workflow.variables ?? []) {
+      if (!variable.promptOnRun) {
+        variables[variable.name] = variable.value;
+        continue;
+      }
+      const value = window.prompt(`Value for ${variable.name}`, variable.value);
+      if (value === null) return;
+      variables[variable.name] = value;
+    }
+    const commandCount = workflow.steps.filter((step) => step.type === "command").length;
+    if (commandCount && !window.confirm(`Run “${workflow.name}” now?\n\nIt contains ${commandCount} shell command${commandCount === 1 ? "" : "s"} that will run with the saved ${workflow.run.permission} permission setting.`)) return;
+    await runWorkflow(workflow.id, "manual", variables);
+  }, [runWorkflow]);
 
   useScheduler({
     schedules: scheduledTasks,
@@ -2231,6 +2259,8 @@ export default function App() {
             { label: "Service tier", value: settings.serviceTier || "standard" },
           ]}
           projectActions={projectActions}
+          workflows={workflows.filter((workflow) => workflow.projectId === activeProject?.id && workflow.enabled)}
+          workflowRuns={workflowRuns}
           onTab={setStudioTab}
           onClose={() => setStudioOpen(false)}
           onRefreshDiff={() => void refreshDiff()}
@@ -2256,6 +2286,9 @@ export default function App() {
           onGitPathAction={(action, path) => void runGitPathAction(action, path)}
           onAttachPath={(path) => setAttachments((current) => current.some((item) => item.path === path) ? current : [...current, { path, name: basename(path), kind: "file" }])}
           onProjectAction={(action) => void runProjectAction(action)}
+          onRunWorkflow={(workflow) => void runWorkflowFromShortcut(workflow)}
+          onStopWorkflow={(workflowId) => void stopWorkflow(workflowId)}
+          onOpenWorkflowRun={(threadId) => void openAgent(threadId)}
           onToggleSkill={(skill) => void toggleSkill(skill)}
           onConnectMcp={(server) => void connectMcp(server)}
         /></Suspense>
@@ -2300,10 +2333,11 @@ export default function App() {
         onActions={(value) => { setProjectActions(value); storeValue("kiwi.projectActions", value); }}
         onSchedules={(value) => { setScheduledTasks(value); storeValue("kiwi.scheduledTasks", value); }}
         onWorkflows={persistWorkflows}
-        onRunWorkflow={async (workflowId) => {
+        onRunWorkflow={async (workflowId, variables) => {
           closeSettings();
-          await runWorkflow(workflowId, "manual");
+          await runWorkflow(workflowId, "manual", variables);
         }}
+        onStopWorkflow={(workflowId) => stopWorkflow(workflowId)}
         onProjects={(value) => { setProjects(value); storeValue("kiwi.projects", value); }}
         scheduleRuns={scheduleRuns}
         onOpenRun={(threadId) => { closeSettings(); void openAgent(threadId); }}
@@ -2360,10 +2394,12 @@ export default function App() {
         open={commandPaletteOpen}
         projects={projects}
         threads={threads}
+        workflows={workflows}
         projectActive={Boolean(activeProject)}
         onClose={() => setCommandPaletteOpen(false)}
         onProject={(project) => { setActiveProjectId(project.id); setWorkspaceMode("project"); storeValue("kiwi.workspaceMode", "project"); }}
         onThread={(thread) => void selectThread(thread)}
+        onWorkflow={(workflow) => void runWorkflowFromShortcut(workflow)}
         onNewThread={newThread}
         onSettings={() => openSettings()}
         onTool={openStudio}

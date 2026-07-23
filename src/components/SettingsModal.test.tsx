@@ -53,6 +53,7 @@ function modalProps(overrides: Partial<Parameters<typeof SettingsModal>[0]> = {}
     onSchedules: vi.fn(),
     onWorkflows: vi.fn(),
     onRunWorkflow: vi.fn(),
+    onStopWorkflow: vi.fn(),
     onChooseSkillsFolder: vi.fn(),
     onRefreshSkills: vi.fn(),
     onImportSkills: vi.fn(),

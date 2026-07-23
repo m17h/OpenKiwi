@@ -2,6 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { ScheduleRunSettings } from "../types";
 import {
   nextWorkflowRunAt,
+  interpolateWorkflowText,
+  normalizeWorkflow,
+  recoverWorkflowRuns,
+  shouldRunWorkflowStep,
   validateWorkflow,
   workflowFromSchedule,
   workflowPrompt,
@@ -62,6 +66,42 @@ describe("workflow definitions", () => {
   it("normalizes interval timing and labels", () => {
     expect(nextWorkflowRunAt({ type: "interval", intervalMinutes: 1 }, 1_000)).toBe(301_000);
     expect(workflowTriggerLabel({ type: "interval", intervalMinutes: 30 })).toBe("Every 30 min");
+  });
+
+  it("interpolates variables and evaluates step conditions", () => {
+    expect(interpolateWorkflowText("Ship ${branch} from ${projectPath}", {
+      branch: "main",
+      projectPath: "/tmp/project",
+    })).toBe("Ship main from /tmp/project");
+    expect(interpolateWorkflowText("Keep ${unknown}", {})).toBe("Keep ${unknown}");
+    const step = { ...workflow().steps[0], condition: { type: "variable-equals" as const, variable: "branch", value: "main" } };
+    expect(shouldRunWorkflowStep(step, "none", { branch: "main" })).toBe(true);
+    expect(shouldRunWorkflowStep(step, "none", { branch: "feature" })).toBe(false);
+    expect(shouldRunWorkflowStep({ ...step, condition: { type: "previous-failed" } }, "failed", {})).toBe(true);
+  });
+
+  it("normalizes legacy steps and recovers unfinished runs after an app exit", () => {
+    const normalized = normalizeWorkflow(workflow());
+    expect(normalized.variables).toEqual([]);
+    expect(normalized.steps[0]).toMatchObject({
+      condition: { type: "always" },
+      retryCount: 0,
+      retryDelaySeconds: 0,
+    });
+    const recovered = recoverWorkflowRuns([{
+      id: "run-1",
+      workflowId: "workflow-1",
+      workflowName: "Release check",
+      projectId: "project-1",
+      source: "manual",
+      startedAt: 1,
+      currentStep: 1,
+      stepCount: 1,
+      status: "running",
+      steps: [{ stepId: "step-1", name: "Review", type: "agent", status: "running", attempts: 1 }],
+    }], 5_000);
+    expect(recovered[0]).toMatchObject({ status: "interrupted", finishedAt: 5_000, recovered: true });
+    expect(recovered[0].steps?.[0]).toMatchObject({ status: "interrupted", finishedAt: 5_000 });
   });
 
   it("imports a scheduled task without losing its runtime snapshot", () => {

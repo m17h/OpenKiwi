@@ -11,7 +11,7 @@ import { WorkflowManager } from "./WorkflowManager";
 
 export interface McpServerView { name: string; status: string; tools: number }
 
-export function HarnessSettings({ section, settings, profiles, agents, actions, schedules, workflows, workflowRuns, projects, skills, onSettings, onProfiles, onAgents, onActions, onSchedules, onWorkflows, onRunWorkflow, mcpServers = [], onMcpChanged, scheduleRuns = [], onOpenRun }: {
+export function HarnessSettings({ section, settings, profiles, agents, actions, schedules, workflows, workflowRuns, projects, skills, onSettings, onProfiles, onAgents, onActions, onSchedules, onWorkflows, onRunWorkflow, onStopWorkflow, mcpServers = [], onMcpChanged, scheduleRuns = [], onOpenRun }: {
   section: "prompts" | "agents" | "workflows" | "tools";
   settings: AppSettings;
   profiles: PromptProfile[];
@@ -28,7 +28,8 @@ export function HarnessSettings({ section, settings, profiles, agents, actions, 
   onActions: (value: ProjectAction[]) => void;
   onSchedules: (value: ScheduledTask[]) => void;
   onWorkflows: (value: WorkflowDefinition[]) => void;
-  onRunWorkflow: (workflowId: string) => Promise<void> | void;
+  onRunWorkflow: (workflowId: string, variables?: Record<string, string>) => Promise<void> | void;
+  onStopWorkflow: (workflowId: string) => Promise<boolean> | boolean;
   mcpServers?: McpServerView[];
   onMcpChanged?: () => void;
   scheduleRuns?: ScheduleRunRecord[];
@@ -79,6 +80,7 @@ export function HarnessSettings({ section, settings, profiles, agents, actions, 
       settings={settings}
       onWorkflows={onWorkflows}
       onRun={onRunWorkflow}
+      onStop={onStopWorkflow}
       onOpenRun={onOpenRun}
     />
 

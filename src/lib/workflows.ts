@@ -5,20 +5,38 @@ export type WorkflowTrigger =
   | { type: "interval"; intervalMinutes: number }
   | { type: "app-start" };
 
+export type WorkflowStepCondition =
+  | { type: "always" }
+  | { type: "previous-succeeded" }
+  | { type: "previous-failed" }
+  | { type: "variable-equals"; variable: string; value: string };
+
+export interface WorkflowVariable {
+  id: string;
+  name: string;
+  value: string;
+  promptOnRun: boolean;
+}
+
+interface WorkflowStepBehavior {
+  continueOnError: boolean;
+  condition?: WorkflowStepCondition;
+  retryCount?: number;
+  retryDelaySeconds?: number;
+}
+
 export type WorkflowStep =
-  | {
+  | WorkflowStepBehavior & {
       id: string;
       type: "agent";
       name: string;
       prompt: string;
-      continueOnError: boolean;
     }
-  | {
+  | WorkflowStepBehavior & {
       id: string;
       type: "command";
       name: string;
       command: string;
-      continueOnError: boolean;
     };
 
 export interface WorkflowDefinition {
@@ -30,6 +48,7 @@ export interface WorkflowDefinition {
   trigger: WorkflowTrigger;
   steps: WorkflowStep[];
   skillNames: string[];
+  variables?: WorkflowVariable[];
   run: ScheduleRunSettings;
   createdAt: number;
   updatedAt: number;
@@ -40,6 +59,19 @@ export interface WorkflowDefinition {
 
 export type WorkflowRunStatus = "running" | "completed" | "failed" | "interrupted";
 export type WorkflowRunSource = "manual" | "interval" | "app-start";
+export type WorkflowRunStepStatus = "pending" | "running" | "completed" | "failed" | "skipped" | "interrupted";
+
+export interface WorkflowRunStepRecord {
+  stepId: string;
+  name: string;
+  type: WorkflowStep["type"];
+  status: WorkflowRunStepStatus;
+  attempts: number;
+  startedAt?: number;
+  finishedAt?: number;
+  output?: string;
+  error?: string;
+}
 
 export interface WorkflowRunRecord {
   id: string;
@@ -53,6 +85,10 @@ export interface WorkflowRunRecord {
   currentStep: number;
   stepCount: number;
   status: WorkflowRunStatus;
+  variables?: Record<string, string>;
+  steps?: WorkflowRunStepRecord[];
+  stopRequestedAt?: number;
+  recovered?: boolean;
   error?: string;
 }
 
@@ -72,6 +108,68 @@ export function workflowStepText(step: WorkflowStep): string {
   return step.type === "agent" ? step.prompt : step.command;
 }
 
+export function workflowStepCondition(step: WorkflowStep): WorkflowStepCondition {
+  return step.condition ?? { type: "always" };
+}
+
+export function workflowStepRetries(step: WorkflowStep): { count: number; delaySeconds: number } {
+  return {
+    count: Math.min(5, Math.max(0, Math.floor(step.retryCount ?? 0))),
+    delaySeconds: Math.min(300, Math.max(0, Math.floor(step.retryDelaySeconds ?? 0))),
+  };
+}
+
+export function normalizeWorkflow(workflow: WorkflowDefinition): WorkflowDefinition {
+  return {
+    ...workflow,
+    variables: workflow.variables ?? [],
+    steps: workflow.steps.map((step) => ({
+      ...step,
+      condition: workflowStepCondition(step),
+      retryCount: workflowStepRetries(step).count,
+      retryDelaySeconds: workflowStepRetries(step).delaySeconds,
+    })),
+  };
+}
+
+export function normalizeWorkflows(workflows: WorkflowDefinition[]): WorkflowDefinition[] {
+  return workflows.map(normalizeWorkflow);
+}
+
+export function interpolateWorkflowText(text: string, variables: Record<string, string>): string {
+  return text.replace(/\$\{([a-zA-Z_][a-zA-Z0-9_-]*)\}/g, (match, name: string) => (
+    Object.hasOwn(variables, name) ? variables[name] : match
+  ));
+}
+
+export function shouldRunWorkflowStep(
+  step: WorkflowStep,
+  previousStatus: "none" | "completed" | "failed" | "skipped",
+  variables: Record<string, string>,
+): boolean {
+  const condition = workflowStepCondition(step);
+  if (condition.type === "previous-succeeded") return previousStatus === "completed";
+  if (condition.type === "previous-failed") return previousStatus === "failed";
+  if (condition.type === "variable-equals") return (variables[condition.variable] ?? "") === interpolateWorkflowText(condition.value, variables);
+  return true;
+}
+
+export function recoverWorkflowRuns(runs: WorkflowRunRecord[], now = Date.now()): WorkflowRunRecord[] {
+  return runs.map((run) => run.status !== "running" ? run : {
+    ...run,
+    status: "interrupted",
+    finishedAt: now,
+    recovered: true,
+    error: "OpenKiwi closed before this workflow finished.",
+    steps: run.steps?.map((step) => step.status !== "running" ? step : {
+      ...step,
+      status: "interrupted",
+      finishedAt: now,
+      error: "Interrupted when OpenKiwi closed.",
+    }),
+  });
+}
+
 export function validateWorkflow(workflow: WorkflowDefinition): string | null {
   if (!workflow.name.trim()) return "Give the workflow a name.";
   if (!workflow.projectId) return "Choose a project.";
@@ -82,6 +180,19 @@ export function validateWorkflow(workflow: WorkflowDefinition): string | null {
   for (const [index, step] of workflow.steps.entries()) {
     if (!step.name.trim()) return `Step ${index + 1} needs a name.`;
     if (!workflowStepText(step).trim()) return `Step ${index + 1} is empty.`;
+    const retries = workflowStepRetries(step);
+    if ((step.retryCount ?? 0) !== retries.count) return `Step ${index + 1} retries must be between 0 and 5.`;
+    if ((step.retryDelaySeconds ?? 0) !== retries.delaySeconds) return `Step ${index + 1} retry delay must be between 0 and 300 seconds.`;
+    const condition = workflowStepCondition(step);
+    if (condition.type === "variable-equals" && !condition.variable.trim()) return `Step ${index + 1} needs a condition variable.`;
+  }
+  const seenVariables = new Set<string>();
+  for (const variable of workflow.variables ?? []) {
+    if (!/^[a-zA-Z_][a-zA-Z0-9_-]*$/.test(variable.name)) {
+      return `Variable “${variable.name || "unnamed"}” needs a simple name containing letters, numbers, dashes, or underscores.`;
+    }
+    if (seenVariables.has(variable.name)) return `Variable “${variable.name}” is duplicated.`;
+    seenVariables.add(variable.name);
   }
   return null;
 }
@@ -90,11 +201,13 @@ export function workflowPrompt(
   workflow: WorkflowDefinition,
   step: Extract<WorkflowStep, { type: "agent" }>,
   stepIndex: number,
+  variables: Record<string, string> = {},
 ): string {
+  const prompt = interpolateWorkflowText(step.prompt.trim(), variables);
   const skills = workflow.skillNames.length
     ? `\n\nSkills available for this step: ${workflow.skillNames.map((name) => `$${name}`).join(", ")}. Use them when relevant.`
     : "";
-  return `[Workflow: ${workflow.name} · Step ${stepIndex + 1}/${workflow.steps.length}: ${step.name}]\n\n${step.prompt.trim()}${skills}`;
+  return `[Workflow: ${workflow.name} · Step ${stepIndex + 1}/${workflow.steps.length}: ${step.name}]\n\n${prompt}${skills}`;
 }
 
 export function workflowFromSchedule(
@@ -117,6 +230,7 @@ export function workflowFromSchedule(
       continueOnError: false,
     }],
     skillNames: [],
+    variables: [],
     run: scheduled.run ?? run,
     createdAt: now,
     updatedAt: now,
@@ -147,6 +261,7 @@ export function workflowFromAction(
       continueOnError: false,
     }],
     skillNames: [],
+    variables: [],
     run,
     createdAt: now,
     updatedAt: now,

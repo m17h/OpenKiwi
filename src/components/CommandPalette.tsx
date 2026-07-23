@@ -1,18 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Command, FileCode2, Folder, GitBranch, MessageSquare, Plus, Search, SearchCode, Settings, TerminalSquare, UsersRound, Wrench, X } from "lucide-react";
+import { Command, FileCode2, Folder, GitBranch, MessageSquare, Plus, Search, SearchCode, Settings, TerminalSquare, UsersRound, Workflow as WorkflowIcon, Wrench, X } from "lucide-react";
+import type { WorkflowDefinition } from "../lib/workflows";
 import type { Project, Thread } from "../types";
 import type { StudioTab } from "./StudioDock";
 
 interface PaletteAction { id: string; label: string; detail: string; icon: typeof Command; run: () => void }
 
-export function CommandPalette({ open, projects, threads, projectActive, onClose, onProject, onThread, onNewThread, onSettings, onTool }: {
+export function CommandPalette({ open, projects, threads, workflows, projectActive, onClose, onProject, onThread, onWorkflow, onNewThread, onSettings, onTool }: {
   open: boolean;
   projects: Project[];
   threads: Thread[];
+  workflows: WorkflowDefinition[];
   projectActive: boolean;
   onClose: () => void;
   onProject: (project: Project) => void;
   onThread: (thread: Thread) => void;
+  onWorkflow: (workflow: WorkflowDefinition) => void;
   onNewThread: () => void;
   onSettings: () => void;
   onTool: (tab: StudioTab) => void;
@@ -31,9 +34,16 @@ export function CommandPalette({ open, projects, threads, projectActive, onClose
       { id: "git", label: "Open Git workspace", detail: "Status, stage, commit, and review CI", icon: GitBranch, run: () => onTool("git") },
       { id: "tools", label: "Open tools & skills", detail: "Project actions, skills, and MCP servers", icon: Wrench, run: () => onTool("tools") },
     ] : []),
+    ...workflows.filter((workflow) => workflow.enabled).map((workflow) => ({
+      id: `workflow-${workflow.id}`,
+      label: `Run workflow: ${workflow.name}`,
+      detail: `${projects.find((project) => project.id === workflow.projectId)?.name ?? "Missing project"} · ${workflow.steps.length} step${workflow.steps.length === 1 ? "" : "s"}`,
+      icon: WorkflowIcon,
+      run: () => onWorkflow(workflow),
+    })),
     ...projects.map((project) => ({ id: `project-${project.id}`, label: project.name, detail: project.path, icon: Folder, run: () => onProject(project) })),
     ...threads.map((thread) => ({ id: `thread-${thread.id}`, label: thread.name || thread.preview || "Untitled thread", detail: thread.preview || "Open thread", icon: MessageSquare, run: () => onThread(thread) })),
-  ].filter((action) => `${action.label} ${action.detail}`.toLowerCase().includes(query.toLowerCase())), [onNewThread, onProject, onSettings, onThread, onTool, projectActive, projects, query, threads]);
+  ].filter((action) => `${action.label} ${action.detail}`.toLowerCase().includes(query.toLowerCase())), [onNewThread, onProject, onSettings, onThread, onTool, onWorkflow, projectActive, projects, query, threads, workflows]);
 
   useEffect(() => {
     if (!open) return;

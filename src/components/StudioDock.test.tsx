@@ -25,6 +25,8 @@ function dockProps(open: boolean): Parameters<typeof StudioDock>[0] {
     gitCommitMessage: "",
     promptAudit: [],
     projectActions: [],
+    workflows: [],
+    workflowRuns: [],
     onTab: vi.fn(),
     onClose: vi.fn(),
     onRefreshDiff: vi.fn(),
@@ -50,6 +52,9 @@ function dockProps(open: boolean): Parameters<typeof StudioDock>[0] {
     onGitPathAction: vi.fn(),
     onAttachPath: vi.fn(),
     onProjectAction: vi.fn(),
+    onRunWorkflow: vi.fn(),
+    onStopWorkflow: vi.fn(),
+    onOpenWorkflowRun: vi.fn(),
     onToggleSkill: vi.fn(),
     onConnectMcp: vi.fn(),
   };

@@ -23,6 +23,7 @@ import {
   ShieldCheck,
   TerminalSquare,
   UsersRound,
+  Workflow as WorkflowIcon,
   Wrench,
   X,
 } from "lucide-react";
@@ -30,6 +31,7 @@ import { FileBrowser } from "./FileBrowser";
 import { XtermPanel } from "./XtermPanel";
 import type { ProjectAction } from "../types";
 import type { TerminalOutputStore } from "../hooks/useTerminal";
+import type { WorkflowDefinition, WorkflowRunRecord } from "../lib/workflows";
 
 export type StudioTab = "files" | "review" | "agents" | "terminal" | "history" | "context" | "usage" | "tools" | "git";
 
@@ -109,6 +111,8 @@ export function StudioDock(props: {
   gitCommitMessage: string;
   promptAudit: Array<{ label: string; value: string }>;
   projectActions: ProjectAction[];
+  workflows: WorkflowDefinition[];
+  workflowRuns: WorkflowRunRecord[];
   onTab: (tab: StudioTab) => void;
   onClose: () => void;
   onRefreshDiff: () => void;
@@ -134,6 +138,9 @@ export function StudioDock(props: {
   onGitPathAction: (action: "stage" | "revert", path: string) => void;
   onAttachPath: (path: string) => void;
   onProjectAction: (action: ProjectAction) => void;
+  onRunWorkflow: (workflow: WorkflowDefinition) => void;
+  onStopWorkflow: (workflowId: string) => void;
+  onOpenWorkflowRun: (threadId: string) => void;
   onToggleSkill: (path: string) => void;
   onConnectMcp: (server: McpView) => void;
 }) {
@@ -272,6 +279,11 @@ export function StudioDock(props: {
           <PanelHeader icon={Wrench} title="Tools & skills" subtitle="Harness capabilities available to the model" onClose={props.onClose} />
           <div className="studio-actions"><button onClick={props.onRefreshTools}><RefreshCw size={13} /> Rescan</button></div>
           <div className="tool-policy-card"><ShieldCheck size={14} /><div><strong>Permission-aware tools</strong><small>Terminal, Git, MCP, and agent actions follow the permission mode selected beneath the composer. Annotated destructive MCP actions still require approval.</small></div></div>
+          <h3 className="panel-label">Agent workflows</h3><div className="studio-list compact">{props.workflows.length ? props.workflows.map((workflow) => {
+            const latest = props.workflowRuns.find((run) => run.workflowId === workflow.id);
+            const running = latest?.status === "running";
+            return <div className="studio-list-row" key={workflow.id}><WorkflowIcon size={14} /><div><strong>{workflow.name}</strong><small>{workflow.steps.length} step{workflow.steps.length === 1 ? "" : "s"} · {running ? `step ${latest.currentStep} of ${latest.stepCount}` : latest?.status ?? "ready"}</small></div>{running ? <button className="danger-action" onClick={() => props.onStopWorkflow(workflow.id)} title="Stop workflow"><CircleStop size={13} /></button> : <button onClick={() => props.onRunWorkflow(workflow)} title="Run workflow"><Play size={13} /></button>}{latest?.threadId && <button onClick={() => props.onOpenWorkflowRun(latest.threadId!)} title="Open workflow thread"><ChevronRight size={13} /></button>}</div>;
+          }) : <span className="tool-empty-line">Add agent workflows in Settings.</span>}</div>
           <h3 className="panel-label">Project actions</h3><div className="studio-list compact">{props.projectActions.length ? props.projectActions.map((action) => <div className="studio-list-row" key={action.id}><Play size={14} /><div><strong>{action.name}</strong><small>{action.command}</small></div><button onClick={() => props.onProjectAction(action)} title="Run action"><Play size={13} /></button></div>) : <span className="tool-empty-line">Add reusable actions in Settings.</span>}</div>
           <h3 className="panel-label">Skills</h3><div className="studio-list compact">{props.skills.length ? props.skills.map((skill) => <div className={`studio-list-row ${skill.enabled === false ? "disabled-tool" : ""}`} key={`${skill.name}-${skill.path}`}><Boxes size={14} /><div><strong>${skill.name}</strong><small>{skill.description || skill.path || "Reusable workflow"}</small></div><button onClick={() => props.onToggleSkill(skill.path)} title={skill.enabled === false ? "Enable skill" : "Disable skill"}>{skill.enabled === false ? <Plus size={13} /> : <Check size={13} />}</button></div>) : <Empty icon={Boxes} title="No skills found" text="Choose a local skills folder in Settings → Skills." />}</div>
           <h3 className="panel-label">MCP servers</h3><div className="studio-list compact">{props.mcpServers.length ? props.mcpServers.map((server) => <div className="studio-list-row" key={server.name}><span className={`status-orb ${server.status}`} /><div><strong>{server.name}</strong><small>{server.status} · {server.tools} tools</small></div>{!['ready','oAuth','bearerToken'].includes(server.status) && <button onClick={() => props.onConnectMcp(server)} title="Connect server"><ChevronRight size={13} /></button>}</div>) : <Empty icon={Wrench} title="No MCP servers" text="Configured servers and their tool counts appear here." />}</div>

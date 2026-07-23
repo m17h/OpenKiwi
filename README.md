@@ -102,8 +102,12 @@ OpenKiwi does not add a hidden instruction telling the model to delegate. The to
 - Every run creates a named project thread, so prompts, model output, commands, and results remain inspectable.
 - Agent steps run sequentially in that thread and may expose selected local skills by their visible `$name`.
 - The workflow captures its provider, model, reasoning, permission, prompt, and sub-agent settings when saved. The editor can refresh that snapshot from the current composer settings.
-- Each step can stop the recipe on failure or explicitly continue. Run history records progress, completion, failure, and the resulting thread.
-- Manual workflows containing shell commands require confirmation before execution. Background runs never request interactive approval and still obey the saved sandbox.
+- Prompts and commands support saved or run-time variables such as `${branch}`, plus built-ins including `${projectPath}`, `${date}`, and `${previousStepOutput}`.
+- Each step can be conditional, retry up to five times with a configurable delay, stop the recipe on failure, or explicitly continue.
+- Active agent turns and shell processes can be stopped at the workflow level. Runs abandoned by an app exit are recovered as interrupted rather than remaining permanently active.
+- Run history records step-level attempts, output, duration, completion, failure, and the resulting thread in a dedicated inspector.
+- Manual workflows containing shell commands show the interpolated command preview before execution. Background runs never request interactive approval and still obey the saved sandbox.
+- Enabled workflows are available from Settings, the command palette, and the active project’s Tools panel.
 
 Existing one-click project actions and single-prompt schedules remain available for lightweight use. A saved schedule can be converted to the richer workflow format without removing the original.
 
