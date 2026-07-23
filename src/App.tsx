@@ -8,12 +8,10 @@ import { isPermissionGranted, requestPermission, sendNotification } from "@tauri
 import {
   Archive,
   ArchiveRestore,
-  ArrowUp,
   Bot,
   Check,
   ChevronDown,
   Circle,
-  CircleStop,
   Code2,
   Command,
   Download,
@@ -115,6 +113,7 @@ import { useAppUpdater } from "./lib/appUpdater";
 import { useCodexEvents } from "./hooks/useCodexEvents";
 import { useScheduler } from "./hooks/useScheduler";
 import { useTerminal } from "./hooks/useTerminal";
+import { usePaneResize } from "./hooks/usePaneResize";
 import { isEstablishedOpenKiwiInstall, ONBOARDING_EXIT_MS, ONBOARDING_VERSION } from "./lib/onboarding";
 import {
   createLocalSkill,
@@ -439,33 +438,7 @@ export default function App() {
     if (!persistActiveProjectOverride("permission", permission)) persistSettings({ ...settings, permission });
   }, [persistActiveProjectOverride, persistSettings, settings]);
 
-  // Drag-resizable sidebar and workspace dock.
-  const [paneSizes, setPaneSizes] = useState(() => loadStored("kiwi.paneSizes", { sidebar: 260, dock: 430 }));
-  const paneSizesRef = useRef(paneSizes);
-  paneSizesRef.current = paneSizes;
-  const uiScaleRef = useRef(1);
-  uiScaleRef.current = (settings.uiScale || 100) / 100;
-  const startPaneResize = useCallback((pane: "sidebar" | "dock") => (event: React.PointerEvent) => {
-    event.preventDefault();
-    const startX = event.clientX;
-    const startSize = paneSizesRef.current[pane];
-    const clamp = (value: number) => pane === "sidebar" ? Math.min(420, Math.max(230, value)) : Math.min(680, Math.max(340, value));
-    const onMove = (moveEvent: PointerEvent) => {
-      // Pointer coordinates are screen pixels; pane widths live inside the
-      // zoomed container, so the delta must be un-zoomed or the handle
-      // drifts away from the cursor at non-100% UI scale.
-      const delta = (moveEvent.clientX - startX) / uiScaleRef.current;
-      const next = clamp(pane === "sidebar" ? startSize + delta : startSize - delta);
-      setPaneSizes((current) => current[pane] === next ? current : { ...current, [pane]: next });
-    };
-    const onUp = () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      storeValue("kiwi.paneSizes", paneSizesRef.current);
-    };
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-  }, []);
+  const { paneSizes, startPaneResize } = usePaneResize((settings.uiScale || 100) / 100);
 
   // Confirmation statuses like "Stopped" used to persist in the topbar forever.
   const transientStatusTimerRef = useRef<number | null>(null);

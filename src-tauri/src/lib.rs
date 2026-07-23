@@ -555,7 +555,7 @@ fn runtime_source(path: &Path) -> &'static str {
     {
         "ChatGPT app"
     } else if env::var_os("OPENKIWI_CODEX_PATH")
-        .is_some_and(|configured| PathBuf::from(configured) == path)
+        .is_some_and(|configured| Path::new(&configured) == path)
     {
         "Custom path"
     } else {
@@ -2129,6 +2129,10 @@ fn shutdown_runtime_on_exit(app: &AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // reqwest and the updater share the same provider-less rustls stack.
+    // Install Ring before either subsystem creates its first HTTP client.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())

@@ -284,7 +284,6 @@ button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px
 .code-copy:hover { color: var(--text); border-color: var(--line-strong); }
 .stop-button { width: 32px; height: 32px; display: grid; place-items: center; padding: 0; border: 1px solid rgba(239,138,135,.25); border-radius: 9px; color: var(--red); background: rgba(239,138,135,.08); cursor: pointer; }
 .stream-caret { display: inline-block; width: 6px; height: 15px; margin-left: 3px; vertical-align: -2px; background: var(--green); animation: blink 1s steps(1) infinite; }
-.activity-stack { display: flex; flex-direction: column; gap: 6px; margin: -10px 0 26px 42px; }
 .activity-row { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; gap: 9px; align-items: start; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.018); }
 .activity-icon { width: 24px; height: 24px; display: grid; place-items: center; border-radius: 6px; color: #a4a9ae; background: #202327; }
 .activity-icon.file { color: var(--green); background: var(--green-soft); }
@@ -888,9 +887,8 @@ button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px
 .diff-summary { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; color: #9ba1a4; font-size: 10.5px; }
 .diff-summary span { display: flex; align-items: center; gap: 5px; }
 .diff-summary small { color: var(--muted-2); }
-.diff-view, .terminal-screen, .git-screen { overflow: auto; margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 8px; color: #aeb5b0; background: #0b0d0f; font: 8.5px/1.5 ui-monospace, "SFMono-Regular", Menlo, monospace; white-space: pre-wrap; }
+.diff-view, .git-screen { overflow: auto; margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 8px; color: #aeb5b0; background: #0b0d0f; font: 8.5px/1.5 ui-monospace, "SFMono-Regular", Menlo, monospace; white-space: pre-wrap; }
 .diff-view { min-height: 290px; max-height: calc(100vh - 160px); }
-.terminal-screen { height: calc(100vh - 155px); color: #b7d6af; }
 .xterm-host { height: calc(100vh - 155px); padding: 9px 4px 8px 9px; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: #0b0d0f; }
 .xterm-host .xterm { height: 100%; }
 .file-browser { height: calc(100vh - 86px); display: flex; flex-direction: column; min-height: 0; }

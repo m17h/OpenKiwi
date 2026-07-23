@@ -35,8 +35,6 @@ const STEPS = [
   { id: "ready", label: "Ready to build", icon: WandSparkles },
 ] as const;
 
-type StepId = typeof STEPS[number]["id"];
-
 function StatusPill({ ready, children }: { ready: boolean; children: ReactNode }) {
   return <span className={`onboarding-status ${ready ? "ready" : "waiting"}`}><i />{children}</span>;
 }
